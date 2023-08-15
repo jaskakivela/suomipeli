@@ -1,0 +1,893 @@
+// main.rs
+
+#![no_std]
+#![no_main]
+
+// #![allow(dead_code)]
+// #![allow(unused_imports)]
+// #![allow(unused_mut)]
+// #![allow(unused_variables)]
+
+use panic_halt as _;
+
+use core::fmt::Write;
+use embedded_hal::digital::v2::{InputPin, OutputPin};
+use fugit::*;
+use port_expander_multi::{dev::pca9555::Driver, Direction, PortDriver, PortDriverTotemPole};
+use rand::{prelude::*, SeedableRng};
+use rp_pico::hal::{
+    self,
+    gpio::{
+        self, bank0::*, pin::Pin, pin::I2C, Function, FunctionI2C, FunctionUart, Input, PullUp,
+        PushPullOutput,
+    },
+    uart, Clock,
+};
+
+use rp_pico::{hal::pac, XOSC_CRYSTAL_FREQ};
+use shared_bus::BusMutex;
+use systick_monotonic::Systick;
+
+use suomipeli::*;
+
+// Some type porn
+type GPIO12 = Pin<Gpio12, Function<I2C>>;
+type GPIO13 = Pin<Gpio13, Function<I2C>>;
+type GPIO18 = Pin<Gpio18, Function<I2C>>;
+type GPIO19 = Pin<Gpio19, Function<I2C>>;
+type GPIO20 = Pin<Gpio20, Input<PullUp>>;
+type LedPin = Pin<Gpio25, PushPullOutput>;
+
+type MyI2C0 = hal::I2C<pac::I2C0, (GPIO12, GPIO13)>;
+type MyI2C1 = hal::I2C<pac::I2C1, (GPIO18, GPIO19)>;
+
+type PortExpInner0 = shared_bus::NullMutex<Driver<MyI2C0>>;
+type PortExpInner1 = shared_bus::NullMutex<Driver<MyI2C1>>;
+type IoE0 = port_expander_multi::Pca9555<PortExpInner0>;
+type IoE1 = port_expander_multi::Pca9555<PortExpInner1>;
+
+type MyUart = uart::UartPeripheral<
+    uart::Enabled,
+    pac::UART0,
+    (
+        Pin<Gpio0, Function<gpio::Uart>>,
+        Pin<Gpio1, Function<gpio::Uart>>,
+    ),
+>;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OutTestState {
+    Idle,
+    Test1,
+    Test2,
+    Test3,
+    Test4,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EasterEggState {
+    Start,
+    Phase1,
+    Phase2,
+    Phase3,
+    Go,
+}
+
+// type EParts = port_expander_multi::dev::pca9555::Parts<'static, MyI2C>;
+// type IPin = port_expander_multi::Pin<'static, mode::Input, PortExpInner>;
+// type OPin = port_expander_multi::Pin<'static, mode::Output, PortExpInner>;
+
+#[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [RTC_IRQ, XIP_IRQ, TIMER_IRQ_3, TIMER_IRQ_2])]
+mod app {
+    use crate::*;
+
+    // IMPORTANT: The USB-Serial with RTIC github project example that I'm following.
+    //            I tried to use the Pico board examples of USB-Serial (without interrupts
+    //            and with interrupts with success, but when using with RTIC I could not make
+    //            it work when merged with the RTIC example.) So I asked some questions
+    //            in the in Matrix chat and received links to examples of there github
+    //            project where it was working, then a used and adapted some parts there
+    //            in this project template.
+    //            This were the kind folks that helped me in the Matrix chat, the 3 projects
+    //            that they suggest me to study are good examples of programs made with RTIC
+    //            and USB and should be studied.
+    //
+    // Paul Daniel Faria
+    // https://github.com/Nashenas88/dactyl-manuform-kb2040-rs/blob/main/src/main.rs#L80
+    //
+    // see also:
+    // korken89
+    // https://github.com/korken89/pico-probe/tree/master/src
+    //
+    // see also:
+    // Mathias
+    // https://github.com/mgottschlag/rp2040-usb-sound-card/blob/b8078b57361c1b08755e5ab5f9992c56457ec18b/src/main.rs#L188
+    //
+    //
+    // Global Static variable, has to be written inside unsafe blocks.
+    // A reference can be obtained with as_ref() method.
+
+    #[shared]
+    struct Shared {
+        led: LedPin,
+        led_on: bool,
+        uart: MyUart,
+
+        irqc: u32,
+        sw_pin: GPIO20,
+
+        ioe0: Option<IoE0>,
+        ioe1: Option<IoE1>,
+
+        bits: [u16; 8],
+        rise: [u16; 8],
+        fall: [u16; 8],
+        output: [u16; 8],
+
+        tstate: OutTestState,
+        estate: EasterEggState,
+
+        rand: bool,
+        rng: Option<StdRng>,
+    }
+
+    #[monotonic(binds = SysTick, default = true)]
+    type SystickMono = Systick<100>;
+
+    #[local]
+    struct Local {}
+
+    #[init()]
+    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
+        //*******
+        // Initialization of the system clock.
+
+        let dp = c.device;
+        let mut resets = dp.RESETS;
+        let mut watchdog = hal::watchdog::Watchdog::new(dp.WATCHDOG);
+
+        // Configure the clocks - The default is to generate a 125 MHz system clock
+        let clocks = hal::clocks::init_clocks_and_plls(
+            XOSC_CRYSTAL_FREQ,
+            dp.XOSC,
+            dp.CLOCKS,
+            dp.PLL_SYS,
+            dp.PLL_USB,
+            &mut resets,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        let systick = c.core.SYST;
+        let mono = Systick::new(systick, 125_000_000);
+
+        // Initialization of the LED GPIO and the timer.
+
+        let sio = hal::Sio::new(dp.SIO);
+        let pins = rp_pico::Pins::new(dp.IO_BANK0, dp.PADS_BANK0, sio.gpio_bank0, &mut resets);
+        let mut led = pins.led.into_push_pull_output();
+        led.set_low().ok();
+
+        let uart_pins = (
+            // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
+            pins.gpio0.into_mode::<FunctionUart>(),
+            // UART RX (characters received by RP2040) on pin 2 (GPIO1)
+            pins.gpio1.into_mode::<FunctionUart>(),
+        );
+        let uart = hal::uart::UartPeripheral::new(dp.UART0, uart_pins, &mut resets)
+            .enable(
+                uart::UartConfig::new(
+                    115200u32.Hz(),
+                    uart::DataBits::Eight,
+                    None,
+                    uart::StopBits::One,
+                ),
+                clocks.peripheral_clock.freq(),
+            )
+            .unwrap();
+
+        // Configure these pins as being I²C, not GPIO
+        #[cfg(feature = "ioe0")]
+        let sda0_pin = pins.gpio12.into_mode::<FunctionI2C>();
+        #[cfg(feature = "ioe0")]
+        let scl0_pin = pins.gpio13.into_mode::<FunctionI2C>();
+
+        #[cfg(feature = "ioe0")]
+        let i2c0 = hal::I2C::i2c0(
+            dp.I2C0,
+            sda0_pin,
+            scl0_pin,
+            100u32.kHz(),
+            &mut resets,
+            &clocks.system_clock,
+        );
+
+        #[cfg(feature = "ioe0")]
+        let ioe0 = Some(port_expander_multi::Pca9555::new_m(i2c0));
+        #[cfg(not(feature = "ioe0"))]
+        let ioe0 = None;
+
+        // Configure these pins as being I²C, not GPIO
+        #[cfg(feature = "ioe1")]
+        let sda1_pin = pins.gpio18.into_mode::<FunctionI2C>();
+        #[cfg(feature = "ioe1")]
+        let scl1_pin = pins.gpio19.into_mode::<FunctionI2C>();
+
+        #[cfg(feature = "ioe1")]
+        let i2c1 = hal::I2C::i2c1(
+            dp.I2C1,
+            sda1_pin,
+            scl1_pin,
+            100u32.kHz(),
+            &mut resets,
+            &clocks.system_clock,
+        );
+        #[cfg(feature = "ioe1")]
+        let ioe1 = Some(port_expander_multi::Pca9555::new_m(i2c1));
+        #[cfg(not(feature = "ioe1"))]
+        let ioe1 = None;
+
+        let mut bits = [0; 8];
+        let rise = [0; 8];
+        let fall = [0; 8];
+        let output = [0; 8];
+
+        // Setup ioe0 for outputs only with LOW state
+        #[cfg(feature = "ioe0")]
+        (0..=7).for_each(|i| {
+            ioe0.as_ref().unwrap().0.lock(|drv| {
+                drv.set_direction(i, 0xFFFF, Direction::Output, false).ok();
+            })
+        });
+
+        // Setup ioe1 for inputs only
+        #[cfg(feature = "ioe1")]
+        (0..=7).for_each(|i| {
+            ioe1.as_ref().unwrap().0.lock(|drv| {
+                drv.set_direction(i, 0xFFFF, Direction::Input, false).ok();
+            })
+        });
+
+        // read all input pins on ioe1 to clear _INT pin
+        #[cfg(feature = "ioe1")]
+        (0..=7).for_each(|i| {
+            ioe1.as_ref().unwrap().0.lock(|drv| {
+                bits[i as usize] = drv.read_u16(i).unwrap();
+            })
+        });
+
+        // Deliver the interrupt from PCA9555s into gpio20
+        let sw_pin = pins.gpio20.into_pull_up_input();
+
+        #[cfg(all(feature = "ioe0", feature = "test_output"))]
+        test_output::spawn_after(1_000u64.millis()).ok();
+
+        #[cfg(all(feature = "ioe1", feature = "io_irq"))]
+        enable_io_irq::spawn_after(10_000u64.millis()).ok();
+
+        #[cfg(all(feature = "ioe1", feature = "io_noirq"))]
+        io_noirq::spawn_after(10_000u64.millis()).ok();
+
+        led_blink::spawn().ok();
+        alive::spawn().ok();
+
+        //********
+        // Return the Shared variables struct, the Local variables struct and the XPTO Monitonics
+        //    (Note: Read again the RTIC book in the section of Monotonics timers)
+        (
+            Shared {
+                led,
+                led_on: false,
+                uart,
+
+                irqc: 0,
+                sw_pin,
+
+                ioe0,
+                ioe1,
+                bits,
+                rise,
+                fall,
+                output,
+
+                tstate: OutTestState::Test1,
+                estate: EasterEggState::Start,
+
+                rand: false,
+                rng: None,
+            },
+            Local {},
+            init::Monotonics(mono),
+        )
+    }
+
+    fn which_bit(bits: &[u16; 8]) -> (u8, u8) {
+        for chip in 0..=7 {
+            let input_bits = bits[chip as usize];
+            if input_bits != 0 {
+                for bit in 0..=15 {
+                    if input_bits & (1 << bit) != 0 {
+                        return (chip, bit as u8);
+                    }
+                }
+            }
+        }
+        (0, 0)
+    }
+
+    // Task with least priority that only runs when nothing else is running.
+    #[idle(local = [x: u32 = 0])]
+    fn idle(cx: idle::Context) -> ! {
+        loop {
+            *cx.local.x += 1;
+        }
+    }
+
+    #[task(priority = 1, shared = [led, led_on])]
+    fn led_blink(cx: led_blink::Context) {
+        let led_blink::SharedResources { led, led_on, .. } = cx.shared;
+        (led, led_on).lock(|led, led_on| {
+            if *led_on {
+                led.set_high().ok();
+                *led_on = false;
+            } else {
+                led.set_low().ok();
+                *led_on = true;
+            }
+        });
+        led_blink::spawn_after(1000u64.millis()).ok();
+    }
+
+    #[task(priority = 1, shared = [irqc, sw_pin, uart])]
+    fn alive(cx: alive::Context) {
+        let mut buf = [0u8; 64];
+
+        let alive::SharedResources {
+            irqc, sw_pin, uart, ..
+        } = cx.shared;
+        (irqc, sw_pin).lock(|irqc_a, sw_pin_a| {
+            writeln!(
+                Wrapper::new(&mut buf),
+                "irqc = {}, swpin = {}\r",
+                *irqc_a,
+                sw_pin_a.is_high().unwrap() as u8
+            )
+            .ok();
+        });
+
+        (uart,).lock(|s| {
+            s.write_full_blocking(&buf);
+        });
+
+        alive::spawn_after(5000u64.millis()).ok();
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [bits, rise, fall, uart])]
+    fn io_report(cx: io_report::Context) {
+        #[cfg(feature = "io_report")]
+        {
+            let mut buf = [0u8; 320];
+            let mut change0 = false;
+            let mut change1 = false;
+
+            let io_report::SharedResources {
+                bits,
+                rise,
+                fall,
+                uart,
+                ..
+            } = cx.shared;
+
+            (bits, rise, fall).lock(|_bits_a, rise_a, fall_a| {
+                (0..=3).for_each(|i| {
+                    if rise_a[i] != 0 || fall_a[i] != 0 {
+                        change0 = true;
+                    }
+                });
+                (4..=7).for_each(|i| {
+                    if rise_a[i] != 0 || fall_a[i] != 0 {
+                        change1 = true;
+                    }
+                });
+
+                let mut w = Wrapper::new(&mut buf);
+                if change0 {
+                    writeln!(
+                        w,
+                        "Rise0: {:016b} {:016b} {:016b} {:016b}\r",
+                        rise_a[0], rise_a[1], rise_a[2], rise_a[3]
+                    )
+                    .ok();
+                    writeln!(
+                        w,
+                        "Fall0: {:016b} {:016b} {:016b} {:016b}\r\n\r",
+                        fall_a[0], fall_a[1], fall_a[2], fall_a[3]
+                    )
+                    .ok();
+                }
+                if change1 {
+                    writeln!(
+                        w,
+                        "Rise1: {:016b} {:016b} {:016b} {:016b}\r",
+                        rise_a[4], rise_a[5], rise_a[6], rise_a[7]
+                    )
+                    .ok();
+                    writeln!(
+                        w,
+                        "Fall1: {:016b} {:016b} {:016b} {:016b}\r\n\r",
+                        fall_a[4], fall_a[5], fall_a[6], fall_a[7]
+                    )
+                    .ok();
+                }
+            });
+
+            if !buf.is_empty() {
+                (uart,).lock(|s| {
+                    s.write_full_blocking(&buf);
+                });
+            }
+        }
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [fall, irqc, uart])]
+    fn input_id(cx: input_id::Context) {
+        #[cfg(feature = "input_id")]
+        {
+            let mut buf = [0u8; 80];
+            let mut change0 = false;
+            let input_id::SharedResources {
+                fall, irqc, uart, ..
+            } = cx.shared;
+
+            (fall, irqc).lock(|fall_a, irqc_a| {
+                (0..=7).for_each(|i| {
+                    if fall_a[i] != 0 {
+                        change0 = true;
+                    }
+                });
+                if change0 {
+                    let mut w = Wrapper::new(&mut buf);
+                    let (chip, bit) = which_bit(fall_a);
+                    let pin = pin_input_ident(chip, bit);
+                    writeln!(
+                        w,
+                        "Input: chip {chip} bit {bit} irqc: {} ident: {pin:?}\r\n\r",
+                        *irqc_a
+                    )
+                    .ok();
+                }
+            });
+
+            if !buf.is_empty() {
+                (uart,).lock(|s| {
+                    s.write_full_blocking(&buf);
+                });
+            }
+        }
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [rand, ioe0, output])]
+    fn easter_egg(cx: easter_egg::Context, pin: MyPin) {
+        #[cfg(all(feature = "ioe0", feature = "ioe1", feature = "in_to_out"))]
+        {
+            let easter_egg::SharedResources {
+                rand, ioe0, output, ..
+            } = cx.shared;
+
+            let (test, test_active) = match pin {
+                MyPin::Quiz01 => (&OUT_TEST1, true),
+                MyPin::Quiz02 => (&OUT_TEST2, true),
+                MyPin::Quiz03 => (&OUT_TEST3, true),
+                MyPin::Quiz04 => (&OUT_TEST4, true),
+                MyPin::Quiz05 => {
+                    out_zero::spawn().ok();
+                    (&OUT_TEST1, false)
+                }
+                MyPin::Quiz23 => {
+                    (rand,).lock(|rand_a| {
+                        *rand_a = true;
+                        rand_output::spawn().ok();
+                    });
+                    (&OUT_TEST1, false)
+                }
+                MyPin::Quiz24 => {
+                    (rand,).lock(|rand_a| {
+                        *rand_a = false;
+                    });
+                    (&OUT_TEST1, false)
+                }
+                _ => (&OUT_TEST1, false),
+            };
+
+            if test_active {
+                (output, ioe0).lock(|output_a, ioe0_a| {
+                    let ioe0 = ioe0_a.as_ref().unwrap();
+                    (0..24).for_each(|i| {
+                        let pin_bits = test[i].clone() as u32;
+                        let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                        let out = output_a[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                        output_a[chip] = out;
+                        ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+                    });
+                });
+            }
+        }
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [fall, estate])]
+    fn in_to_out(cx: in_to_out::Context) {
+        #[cfg(all(feature = "ioe0", feature = "ioe1", feature = "in_to_out"))]
+        {
+            let in_to_out::SharedResources { fall, estate, .. } = cx.shared;
+            let mut fall0 = false;
+            let (mut chip, mut bit) = (0, 0);
+            (fall,).lock(|fall_a| {
+                (0..=7).for_each(|i| {
+                    if fall_a[i] != 0 {
+                        fall0 = true;
+                        (chip, bit) = which_bit(fall_a);
+                    }
+                });
+            });
+            if fall0 {
+                let pin = pin_input_ident(chip, bit);
+
+                (estate,).lock(|estate_a| match *estate_a {
+                    EasterEggState::Start => {
+                        if let MyPin::Map05_Turku = pin {
+                            *estate_a = EasterEggState::Phase1;
+                        }
+                    }
+                    EasterEggState::Phase1 => {
+                        if let MyPin::Map01_Tammisaari = pin {
+                            *estate_a = EasterEggState::Phase2;
+                        } else {
+                            *estate_a = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Phase2 => {
+                        if let MyPin::Map05_Turku = pin {
+                            *estate_a = EasterEggState::Phase3;
+                        } else {
+                            *estate_a = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Phase3 => {
+                        if let MyPin::Map01_Tammisaari = pin {
+                            *estate_a = EasterEggState::Go;
+                        } else {
+                            *estate_a = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Go => {
+                        *estate_a = EasterEggState::Start;
+                        easter_egg::spawn(pin.clone()).ok();
+                    }
+                });
+
+                if let MyPin::UnknownPin = pin {
+                    // ignore unknowns
+                } else {
+                    set_output::spawn(pin.clone()).ok();
+                    clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
+
+                    match pin {
+                        MyPin::Quiz01 => {
+                            set_output::spawn(MyPin::Socket01).ok();
+                        }
+                        MyPin::Quiz02 => {
+                            set_output::spawn(MyPin::Socket02).ok();
+                        }
+                        MyPin::Quiz03 => {
+                            set_output::spawn(MyPin::Socket03).ok();
+                        }
+                        MyPin::Quiz04 => {
+                            set_output::spawn(MyPin::Socket04).ok();
+                        }
+                        MyPin::Quiz05 => {
+                            set_output::spawn(MyPin::Socket05).ok();
+                        }
+                        MyPin::Quiz06 => {
+                            set_output::spawn(MyPin::Socket06).ok();
+                        }
+                        MyPin::Quiz07 => {
+                            set_output::spawn(MyPin::Socket07).ok();
+                        }
+                        MyPin::Quiz08 => {
+                            set_output::spawn(MyPin::Socket08).ok();
+                        }
+                        MyPin::Quiz09 => {
+                            set_output::spawn(MyPin::Socket09).ok();
+                        }
+                        MyPin::Quiz10 => {
+                            set_output::spawn(MyPin::Socket10).ok();
+                        }
+                        MyPin::Quiz11 => {
+                            set_output::spawn(MyPin::Socket11).ok();
+                        }
+                        MyPin::Quiz12 => {
+                            set_output::spawn(MyPin::Socket12).ok();
+                        }
+                        MyPin::Quiz13 => {
+                            set_output::spawn(MyPin::Socket13).ok();
+                        }
+                        MyPin::Quiz14 => {
+                            set_output::spawn(MyPin::Socket14).ok();
+                        }
+                        MyPin::Quiz15 => {
+                            set_output::spawn(MyPin::Socket15).ok();
+                        }
+                        MyPin::Quiz16 => {
+                            set_output::spawn(MyPin::Socket16).ok();
+                        }
+                        MyPin::Quiz17 => {
+                            set_output::spawn(MyPin::Socket17).ok();
+                        }
+                        MyPin::Quiz18 => {
+                            set_output::spawn(MyPin::Socket18).ok();
+                        }
+                        MyPin::Quiz19 => {
+                            set_output::spawn(MyPin::Socket19).ok();
+                        }
+                        MyPin::Quiz20 => {
+                            set_output::spawn(MyPin::Socket20).ok();
+                        }
+                        MyPin::Quiz21 => {
+                            set_output::spawn(MyPin::Socket21).ok();
+                        }
+                        MyPin::Quiz22 => {
+                            set_output::spawn(MyPin::Socket22).ok();
+                        }
+                        MyPin::Quiz23 => {
+                            set_output::spawn(MyPin::Socket23).ok();
+                        }
+                        MyPin::Quiz24 => {
+                            set_output::spawn(MyPin::Socket24).ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
+    fn set_output(cx: set_output::Context, pin: MyPin) {
+        #[cfg(feature = "ioe0")]
+        {
+            let set_output::SharedResources { ioe0, output, .. } = cx.shared;
+            (ioe0, output).lock(|ioe0_a, output_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                let pin_bits = pin.clone() as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output_a[chip] | (1u16 << ((pin_bits & 0xFF) as u8));
+                output_a[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
+    fn toggle_output(cx: toggle_output::Context, pin: MyPin) {
+        #[cfg(feature = "ioe0")]
+        {
+            let toggle_output::SharedResources { ioe0, output, .. } = cx.shared;
+            (ioe0, output).lock(|ioe0_a, output_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                let pin_bits = pin.clone() as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output_a[chip] ^ (1u16 << ((pin_bits & 0xFF) as u8));
+                output_a[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 64, shared = [ioe0, output])]
+    fn clear_output(cx: clear_output::Context, pin: MyPin) {
+        #[cfg(feature = "ioe0")]
+        {
+            let clear_output::SharedResources { ioe0, output, .. } = cx.shared;
+            (ioe0, output).lock(|ioe0_a, output_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                let pin_bits = pin.clone() as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output_a[chip] & (!(1u16 << ((pin_bits & 0xFF) as u8)));
+                output_a[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    fn out_zero(cx: out_zero::Context) {
+        #[cfg(feature = "ioe0")]
+        {
+            let out_zero::SharedResources { ioe0, output, .. } = cx.shared;
+            (ioe0, output).lock(|ioe0_a, output_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                (0..=7u8).for_each(|i| {
+                    ioe0.0.lock(|drv| drv.write_u16(i, 0).ok());
+                    output_a[i as usize] = 0;
+                });
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    fn out_ones(cx: out_ones::Context) {
+        #[cfg(feature = "ioe0")]
+        {
+            let out_ones::SharedResources { ioe0, output, .. } = cx.shared;
+            (ioe0, output).lock(|ioe0_a, output_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                (0..=7).for_each(|i| {
+                    ioe0.0.lock(|drv| drv.write_u16(i, 0xFFFF).ok());
+                    output_a[i as usize] = 0xFFFF;
+                });
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe1, bits, rise, fall])]
+    fn io_poll(cx: io_poll::Context) {
+        #[cfg(feature = "ioe1")]
+        {
+            let io_poll::SharedResources {
+                ioe1,
+                bits,
+                rise,
+                fall,
+                ..
+            } = cx.shared;
+            let mut changed = false;
+            let mut fallen = false;
+            (ioe1, bits, rise, fall).lock(|ioe1_a, bits_a, rise_a, fall_a| {
+                let ioe1 = ioe1_a.as_ref().unwrap();
+                (0..=7).for_each(|i| {
+                    ioe1.0.lock(|drv| {
+                        let before = bits_a[i as usize];
+                        let after = drv.read_u16(i).unwrap();
+                        if after != before {
+                            changed = true;
+                            let fallen_bits = before & !after;
+                            if fallen_bits != 0 {
+                                fallen = true;
+                            }
+                            rise_a[i as usize] = !before & after;
+                            fall_a[i as usize] = fallen_bits;
+                            bits_a[i as usize] = after;
+                        }
+                    });
+                });
+            });
+
+            if changed {
+                #[cfg(feature = "io_report")]
+                io_report::spawn().ok();
+            }
+            if fallen {
+                #[cfg(feature = "input_id")]
+                input_id::spawn().ok();
+                #[cfg(feature = "in_to_out")]
+                in_to_out::spawn().ok();
+            }
+        }
+    }
+
+    #[task(priority = 1, shared = [ioe0, output, tstate])]
+    fn test_output(cx: test_output::Context) {
+        #[cfg(all(feature = "ioe0", feature = "test_output"))]
+        {
+            let test_output::SharedResources {
+                ioe0,
+                output,
+                tstate,
+                ..
+            } = cx.shared;
+
+            (ioe0, output, tstate).lock(|ioe0_a, output_a, tstate_a| {
+                let ioe0 = ioe0_a.as_ref().unwrap();
+                let (test, active) = match *tstate_a {
+                    OutTestState::Test1 => {
+                        *tstate_a = OutTestState::Test2;
+                        out_zero::spawn_after(2900u64.millis()).ok();
+                        (&OUT_TEST1, true)
+                    }
+                    OutTestState::Test2 => {
+                        *tstate_a = OutTestState::Test3;
+                        out_zero::spawn_after(2900u64.millis()).ok();
+                        (&OUT_TEST2, true)
+                    }
+                    OutTestState::Test3 => {
+                        *tstate_a = OutTestState::Test4;
+                        out_zero::spawn_after(2900u64.millis()).ok();
+                        (&OUT_TEST3, true)
+                    }
+                    OutTestState::Test4 => {
+                        *tstate_a = OutTestState::Idle;
+                        out_zero::spawn_after(2900u64.millis()).ok();
+                        (&OUT_TEST4, true)
+                    }
+                    OutTestState::Idle => (&OUT_TEST4, false),
+                };
+
+                if active {
+                    (0..24).for_each(|i| {
+                        let pin_bits = test[i].clone() as u32;
+                        let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                        let out = output_a[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                        output_a[chip] = out;
+                        ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+                    });
+                    test_output::spawn_after(3000u64.millis()).ok();
+                }
+            });
+        }
+    }
+
+    #[task(priority = 1, shared = [rand, rng])]
+    fn rand_output(cx: rand_output::Context) {
+        let rand_output::SharedResources { rand, rng, .. } = cx.shared;
+        (rng,).lock(|rng_a| {
+            if rng_a.is_none() {
+                *rng_a = Some(StdRng::seed_from_u64(monotonics::now().ticks()));
+            }
+
+            let mut r: [u8; 2] = [0; 2];
+            rng_a.as_mut().unwrap().fill_bytes(&mut r);
+            let rpin = pin_input_ident(r[0] & 0x07, r[1] & 0x0F);
+            match rpin {
+                MyPin::UnknownPin => {}
+                p => {
+                    // Blink the lamp for 0,5 seconds
+                    set_output::spawn(p.clone()).ok();
+                    clear_output::spawn_after(500u64.millis(), p).ok();
+                }
+            }
+        });
+        (rand,).lock(|rand_a| {
+            if *rand_a {
+                rand_output::spawn_after(50u64.millis()).ok();
+            }
+        });
+    }
+
+    #[task(priority = 2)]
+    fn io_noirq(_cx: io_noirq::Context) {
+        #[cfg(feature = "ioe1")]
+        io_poll::spawn().ok();
+
+        io_noirq::spawn_after(100u64.millis()).ok();
+    }
+
+    #[task(priority = 2, capacity = 4, shared = [sw_pin])]
+    fn enable_io_irq(cx: enable_io_irq::Context) {
+        #[cfg(feature = "ioe1")]
+        io_poll::spawn().ok();
+        let enable_io_irq::SharedResources { sw_pin, .. } = cx.shared;
+        (sw_pin,).lock(|sw_pin_a| {
+            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            sw_pin_a.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, true);
+        });
+    }
+
+    #[task(binds = IO_IRQ_BANK0, priority = 3, shared = [irqc, sw_pin])]
+    fn io_irq(cx: io_irq::Context) {
+        let io_irq::SharedResources { irqc, sw_pin, .. } = cx.shared;
+
+        (irqc, sw_pin).lock(|irqc_a, sw_pin_a| {
+            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            sw_pin_a.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, false);
+            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            *irqc_a += 1;
+        });
+        enable_io_irq::spawn_after(200u64.millis()).ok();
+
+        #[cfg(feature = "ioe1")]
+        io_poll::spawn().ok();
+    }
+}
+
+// EOF
