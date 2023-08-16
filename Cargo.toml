@@ -3,28 +3,17 @@ authors = ["sjm"]
 edition = "2021"
 readme = "README.md"
 name = "suomipeli"
-version = "0.1.0"
+version = "0.1.1"
 resolver = "2"
 
 
 [features]
-default = [
-    "io_irq",
-    "ioe0",
-    "ioe1",
-    "test_output",
-    "io_report",
-    "input_id",
-    "in_to_out",
-]
+default = ["io_irq", "test_output", "io_debug", "input_debug"]
 io_irq = []
 io_noirq = []
-ioe0 = []
-ioe1 = []
-io_report = []
-input_id = []
+io_debug = []
+input_debug = []
 test_output = []
-in_to_out = []
 
 
 [dependencies]

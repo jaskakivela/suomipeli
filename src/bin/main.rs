@@ -116,8 +116,8 @@ mod app {
         irqc: u32,
         sw_pin: GPIO20,
 
-        ioe0: Option<IoE0>,
-        ioe1: Option<IoE1>,
+        ioe0: IoE0,
+        ioe1: IoE1,
 
         bits: [u16; 8],
         rise: [u16; 8],
@@ -162,12 +162,14 @@ mod app {
         let systick = c.core.SYST;
         let mono = Systick::new(systick, 125_000_000);
 
-        // Initialization of the LED GPIO and the timer.
+        // Initialize the LED GPIO
 
         let sio = hal::Sio::new(dp.SIO);
         let pins = rp_pico::Pins::new(dp.IO_BANK0, dp.PADS_BANK0, sio.gpio_bank0, &mut resets);
         let mut led = pins.led.into_push_pull_output();
         led.set_low().ok();
+
+        // Initialize the UART
 
         let uart_pins = (
             // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
@@ -186,14 +188,19 @@ mod app {
                 clocks.peripheral_clock.freq(),
             )
             .unwrap();
+        let mut buf = [0u8; 80];
+        writeln!(
+            Wrapper::new(&mut buf),
+            "*** Starting up Suomipeli\r\n\
+            \x20   firmware v{}\r\n\r",
+            env!("CARGO_PKG_VERSION")
+        )
+        .ok();
+        uart.write_full_blocking(&buf);
 
         // Configure these pins as being I²C, not GPIO
-        #[cfg(feature = "ioe0")]
         let sda0_pin = pins.gpio12.into_mode::<FunctionI2C>();
-        #[cfg(feature = "ioe0")]
         let scl0_pin = pins.gpio13.into_mode::<FunctionI2C>();
-
-        #[cfg(feature = "ioe0")]
         let i2c0 = hal::I2C::i2c0(
             dp.I2C0,
             sda0_pin,
@@ -202,19 +209,11 @@ mod app {
             &mut resets,
             &clocks.system_clock,
         );
-
-        #[cfg(feature = "ioe0")]
-        let ioe0 = Some(port_expander_multi::Pca9555::new_m(i2c0));
-        #[cfg(not(feature = "ioe0"))]
-        let ioe0 = None;
+        let ioe0 = port_expander_multi::Pca9555::new_m(i2c0);
 
         // Configure these pins as being I²C, not GPIO
-        #[cfg(feature = "ioe1")]
         let sda1_pin = pins.gpio18.into_mode::<FunctionI2C>();
-        #[cfg(feature = "ioe1")]
         let scl1_pin = pins.gpio19.into_mode::<FunctionI2C>();
-
-        #[cfg(feature = "ioe1")]
         let i2c1 = hal::I2C::i2c1(
             dp.I2C1,
             sda1_pin,
@@ -223,10 +222,7 @@ mod app {
             &mut resets,
             &clocks.system_clock,
         );
-        #[cfg(feature = "ioe1")]
-        let ioe1 = Some(port_expander_multi::Pca9555::new_m(i2c1));
-        #[cfg(not(feature = "ioe1"))]
-        let ioe1 = None;
+        let ioe1 = port_expander_multi::Pca9555::new_m(i2c1);
 
         let mut bits = [0; 8];
         let rise = [0; 8];
@@ -234,25 +230,22 @@ mod app {
         let output = [0; 8];
 
         // Setup ioe0 for outputs only with LOW state
-        #[cfg(feature = "ioe0")]
         (0..=7).for_each(|i| {
-            ioe0.as_ref().unwrap().0.lock(|drv| {
+            ioe0.0.lock(|drv| {
                 drv.set_direction(i, 0xFFFF, Direction::Output, false).ok();
             })
         });
 
         // Setup ioe1 for inputs only
-        #[cfg(feature = "ioe1")]
         (0..=7).for_each(|i| {
-            ioe1.as_ref().unwrap().0.lock(|drv| {
+            ioe1.0.lock(|drv| {
                 drv.set_direction(i, 0xFFFF, Direction::Input, false).ok();
             })
         });
 
         // read all input pins on ioe1 to clear _INT pin
-        #[cfg(feature = "ioe1")]
         (0..=7).for_each(|i| {
-            ioe1.as_ref().unwrap().0.lock(|drv| {
+            ioe1.0.lock(|drv| {
                 bits[i as usize] = drv.read_u16(i).unwrap();
             })
         });
@@ -260,13 +253,13 @@ mod app {
         // Deliver the interrupt from PCA9555s into gpio20
         let sw_pin = pins.gpio20.into_pull_up_input();
 
-        #[cfg(all(feature = "ioe0", feature = "test_output"))]
+        #[cfg(feature = "test_output")]
         test_output::spawn_after(1_000u64.millis()).ok();
 
-        #[cfg(all(feature = "ioe1", feature = "io_irq"))]
+        #[cfg(feature = "io_irq")]
         enable_io_irq::spawn_after(10_000u64.millis()).ok();
 
-        #[cfg(all(feature = "ioe1", feature = "io_noirq"))]
+        #[cfg(feature = "io_noirq")]
         io_noirq::spawn_after(10_000u64.millis()).ok();
 
         led_blink::spawn().ok();
@@ -327,6 +320,7 @@ mod app {
     #[task(priority = 1, shared = [led, led_on])]
     fn led_blink(cx: led_blink::Context) {
         let led_blink::SharedResources { led, led_on, .. } = cx.shared;
+
         (led, led_on).lock(|led, led_on| {
             if *led_on {
                 led.set_high().ok();
@@ -341,444 +335,299 @@ mod app {
 
     #[task(priority = 1, shared = [irqc, sw_pin, uart])]
     fn alive(cx: alive::Context) {
-        let mut buf = [0u8; 64];
-
         let alive::SharedResources {
             irqc, sw_pin, uart, ..
         } = cx.shared;
-        (irqc, sw_pin).lock(|irqc_a, sw_pin_a| {
+
+        let mut buf = [0u8; 64];
+
+        (irqc, sw_pin).lock(|irqc, sw_pin| {
             writeln!(
                 Wrapper::new(&mut buf),
                 "irqc = {}, swpin = {}\r",
-                *irqc_a,
-                sw_pin_a.is_high().unwrap() as u8
+                *irqc,
+                sw_pin.is_high().unwrap() as u8
             )
             .ok();
         });
 
-        (uart,).lock(|s| {
-            s.write_full_blocking(&buf);
+        (uart,).lock(|uart| {
+            uart.write_full_blocking(&buf);
         });
 
         alive::spawn_after(5000u64.millis()).ok();
     }
 
     #[task(priority = 1, capacity = 4, shared = [bits, rise, fall, uart])]
-    fn io_report(cx: io_report::Context) {
-        #[cfg(feature = "io_report")]
-        {
-            let mut buf = [0u8; 320];
-            let mut change0 = false;
-            let mut change1 = false;
+    fn io_debug(cx: io_debug::Context) {
+        let io_debug::SharedResources {
+            bits,
+            rise,
+            fall,
+            uart,
+            ..
+        } = cx.shared;
 
-            let io_report::SharedResources {
-                bits,
-                rise,
-                fall,
-                uart,
-                ..
-            } = cx.shared;
+        let mut buf = [0u8; 320];
+        let mut change0 = false;
+        let mut change1 = false;
 
-            (bits, rise, fall).lock(|_bits_a, rise_a, fall_a| {
-                (0..=3).for_each(|i| {
-                    if rise_a[i] != 0 || fall_a[i] != 0 {
-                        change0 = true;
-                    }
-                });
-                (4..=7).for_each(|i| {
-                    if rise_a[i] != 0 || fall_a[i] != 0 {
-                        change1 = true;
-                    }
-                });
-
-                let mut w = Wrapper::new(&mut buf);
-                if change0 {
-                    writeln!(
-                        w,
-                        "Rise0: {:016b} {:016b} {:016b} {:016b}\r",
-                        rise_a[0], rise_a[1], rise_a[2], rise_a[3]
-                    )
-                    .ok();
-                    writeln!(
-                        w,
-                        "Fall0: {:016b} {:016b} {:016b} {:016b}\r\n\r",
-                        fall_a[0], fall_a[1], fall_a[2], fall_a[3]
-                    )
-                    .ok();
+        (bits, rise, fall).lock(|_bits, rise, fall| {
+            (0..=3).for_each(|i| {
+                if rise[i] != 0 || fall[i] != 0 {
+                    change0 = true;
                 }
-                if change1 {
-                    writeln!(
-                        w,
-                        "Rise1: {:016b} {:016b} {:016b} {:016b}\r",
-                        rise_a[4], rise_a[5], rise_a[6], rise_a[7]
-                    )
-                    .ok();
-                    writeln!(
-                        w,
-                        "Fall1: {:016b} {:016b} {:016b} {:016b}\r\n\r",
-                        fall_a[4], fall_a[5], fall_a[6], fall_a[7]
-                    )
-                    .ok();
+            });
+            (4..=7).for_each(|i| {
+                if rise[i] != 0 || fall[i] != 0 {
+                    change1 = true;
                 }
             });
 
-            if !buf.is_empty() {
-                (uart,).lock(|s| {
-                    s.write_full_blocking(&buf);
-                });
+            let mut w = Wrapper::new(&mut buf);
+            if change0 {
+                writeln!(
+                    w,
+                    "Rise0: {:016b} {:016b} {:016b} {:016b}\r",
+                    rise[0], rise[1], rise[2], rise[3]
+                )
+                .ok();
+                writeln!(
+                    w,
+                    "Fall0: {:016b} {:016b} {:016b} {:016b}\r\n\r",
+                    fall[0], fall[1], fall[2], fall[3]
+                )
+                .ok();
             }
+            if change1 {
+                writeln!(
+                    w,
+                    "Rise1: {:016b} {:016b} {:016b} {:016b}\r",
+                    rise[4], rise[5], rise[6], rise[7]
+                )
+                .ok();
+                writeln!(
+                    w,
+                    "Fall1: {:016b} {:016b} {:016b} {:016b}\r\n\r",
+                    fall[4], fall[5], fall[6], fall[7]
+                )
+                .ok();
+            }
+        });
+
+        if !buf.is_empty() {
+            (uart,).lock(|uart| {
+                uart.write_full_blocking(&buf);
+            });
         }
     }
 
-    #[task(priority = 1, capacity = 4, shared = [fall, irqc, uart])]
-    fn input_id(cx: input_id::Context) {
-        #[cfg(feature = "input_id")]
-        {
-            let mut buf = [0u8; 80];
-            let mut change0 = false;
-            let input_id::SharedResources {
-                fall, irqc, uart, ..
-            } = cx.shared;
+    #[task(priority = 1, capacity = 4, shared = [fall, estate, irqc, uart])]
+    fn input_event(cx: input_event::Context) {
+        let input_event::SharedResources {
+            fall,
+            estate,
+            irqc,
+            uart,
+            ..
+        } = cx.shared;
 
-            (fall, irqc).lock(|fall_a, irqc_a| {
-                (0..=7).for_each(|i| {
-                    if fall_a[i] != 0 {
-                        change0 = true;
-                    }
-                });
-                if change0 {
-                    let mut w = Wrapper::new(&mut buf);
-                    let (chip, bit) = which_bit(fall_a);
-                    let pin = pin_input_ident(chip, bit);
+        let mut edge_low = false;
+        let (mut chip, mut bit) = (0, 0);
+
+        (fall,).lock(|fall| {
+            (0..=7).for_each(|i| {
+                if fall[i] != 0 {
+                    edge_low = true;
+                    (chip, bit) = which_bit(fall);
+                }
+            });
+        });
+
+        if edge_low {
+            let pin = pin_input_ident(chip, bit);
+
+            #[cfg(feature = "input_debug")]
+            {
+                let mut buf = [0u8; 80];
+                let mut w = Wrapper::new(&mut buf);
+
+                (irqc,).lock(|irqc| {
                     writeln!(
                         w,
                         "Input: chip {chip} bit {bit} irqc: {} ident: {pin:?}\r\n\r",
-                        *irqc_a
+                        *irqc
                     )
                     .ok();
-                }
-            });
-
-            if !buf.is_empty() {
-                (uart,).lock(|s| {
-                    s.write_full_blocking(&buf);
+                });
+                (uart,).lock(|uart| {
+                    uart.write_full_blocking(&buf);
                 });
             }
-        }
-    }
 
-    #[task(priority = 1, capacity = 4, shared = [rand, ioe0, output])]
-    fn easter_egg(cx: easter_egg::Context, pin: MyPin) {
-        #[cfg(all(feature = "ioe0", feature = "ioe1", feature = "in_to_out"))]
-        {
-            let easter_egg::SharedResources {
-                rand, ioe0, output, ..
-            } = cx.shared;
-
-            let (test, test_active) = match pin {
-                MyPin::Quiz01 => (&OUT_TEST1, true),
-                MyPin::Quiz02 => (&OUT_TEST2, true),
-                MyPin::Quiz03 => (&OUT_TEST3, true),
-                MyPin::Quiz04 => (&OUT_TEST4, true),
-                MyPin::Quiz05 => {
-                    out_zero::spawn().ok();
-                    (&OUT_TEST1, false)
-                }
-                MyPin::Quiz23 => {
-                    (rand,).lock(|rand_a| {
-                        *rand_a = true;
-                        rand_output::spawn().ok();
-                    });
-                    (&OUT_TEST1, false)
-                }
-                MyPin::Quiz24 => {
-                    (rand,).lock(|rand_a| {
-                        *rand_a = false;
-                    });
-                    (&OUT_TEST1, false)
-                }
-                _ => (&OUT_TEST1, false),
-            };
-
-            if test_active {
-                (output, ioe0).lock(|output_a, ioe0_a| {
-                    let ioe0 = ioe0_a.as_ref().unwrap();
-                    (0..24).for_each(|i| {
-                        let pin_bits = test[i].clone() as u32;
-                        let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                        let out = output_a[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
-                        output_a[chip] = out;
-                        ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-                    });
-                });
-            }
-        }
-    }
-
-    #[task(priority = 1, capacity = 4, shared = [fall, estate])]
-    fn in_to_out(cx: in_to_out::Context) {
-        #[cfg(all(feature = "ioe0", feature = "ioe1", feature = "in_to_out"))]
-        {
-            let in_to_out::SharedResources { fall, estate, .. } = cx.shared;
-            let mut fall0 = false;
-            let (mut chip, mut bit) = (0, 0);
-            (fall,).lock(|fall_a| {
-                (0..=7).for_each(|i| {
-                    if fall_a[i] != 0 {
-                        fall0 = true;
-                        (chip, bit) = which_bit(fall_a);
+            (estate,).lock(|estate| match *estate {
+                EasterEggState::Start => {
+                    if let MyPin::Map05_Turku = pin {
+                        *estate = EasterEggState::Phase1;
                     }
-                });
+                }
+                EasterEggState::Phase1 => {
+                    if let MyPin::Map01_Tammisaari = pin {
+                        *estate = EasterEggState::Phase2;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Phase2 => {
+                    if let MyPin::Map05_Turku = pin {
+                        *estate = EasterEggState::Phase3;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Phase3 => {
+                    if let MyPin::Map01_Tammisaari = pin {
+                        *estate = EasterEggState::Go;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Go => {
+                    *estate = EasterEggState::Start;
+                    easter_egg::spawn(pin.clone()).ok();
+                }
             });
-            if fall0 {
-                let pin = pin_input_ident(chip, bit);
 
-                (estate,).lock(|estate_a| match *estate_a {
-                    EasterEggState::Start => {
-                        if let MyPin::Map05_Turku = pin {
-                            *estate_a = EasterEggState::Phase1;
-                        }
-                    }
-                    EasterEggState::Phase1 => {
-                        if let MyPin::Map01_Tammisaari = pin {
-                            *estate_a = EasterEggState::Phase2;
-                        } else {
-                            *estate_a = EasterEggState::Start;
-                        }
-                    }
-                    EasterEggState::Phase2 => {
-                        if let MyPin::Map05_Turku = pin {
-                            *estate_a = EasterEggState::Phase3;
-                        } else {
-                            *estate_a = EasterEggState::Start;
-                        }
-                    }
-                    EasterEggState::Phase3 => {
-                        if let MyPin::Map01_Tammisaari = pin {
-                            *estate_a = EasterEggState::Go;
-                        } else {
-                            *estate_a = EasterEggState::Start;
-                        }
-                    }
-                    EasterEggState::Go => {
-                        *estate_a = EasterEggState::Start;
-                        easter_egg::spawn(pin.clone()).ok();
-                    }
-                });
+            if let MyPin::UnknownPin = pin {
+                // ignore unknowns
+            } else {
+                set_output::spawn(pin.clone()).ok();
+                clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
 
-                if let MyPin::UnknownPin = pin {
-                    // ignore unknowns
-                } else {
-                    set_output::spawn(pin.clone()).ok();
-                    clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
-
-                    match pin {
-                        MyPin::Quiz01 => {
-                            set_output::spawn(MyPin::Socket01).ok();
-                        }
-                        MyPin::Quiz02 => {
-                            set_output::spawn(MyPin::Socket02).ok();
-                        }
-                        MyPin::Quiz03 => {
-                            set_output::spawn(MyPin::Socket03).ok();
-                        }
-                        MyPin::Quiz04 => {
-                            set_output::spawn(MyPin::Socket04).ok();
-                        }
-                        MyPin::Quiz05 => {
-                            set_output::spawn(MyPin::Socket05).ok();
-                        }
-                        MyPin::Quiz06 => {
-                            set_output::spawn(MyPin::Socket06).ok();
-                        }
-                        MyPin::Quiz07 => {
-                            set_output::spawn(MyPin::Socket07).ok();
-                        }
-                        MyPin::Quiz08 => {
-                            set_output::spawn(MyPin::Socket08).ok();
-                        }
-                        MyPin::Quiz09 => {
-                            set_output::spawn(MyPin::Socket09).ok();
-                        }
-                        MyPin::Quiz10 => {
-                            set_output::spawn(MyPin::Socket10).ok();
-                        }
-                        MyPin::Quiz11 => {
-                            set_output::spawn(MyPin::Socket11).ok();
-                        }
-                        MyPin::Quiz12 => {
-                            set_output::spawn(MyPin::Socket12).ok();
-                        }
-                        MyPin::Quiz13 => {
-                            set_output::spawn(MyPin::Socket13).ok();
-                        }
-                        MyPin::Quiz14 => {
-                            set_output::spawn(MyPin::Socket14).ok();
-                        }
-                        MyPin::Quiz15 => {
-                            set_output::spawn(MyPin::Socket15).ok();
-                        }
-                        MyPin::Quiz16 => {
-                            set_output::spawn(MyPin::Socket16).ok();
-                        }
-                        MyPin::Quiz17 => {
-                            set_output::spawn(MyPin::Socket17).ok();
-                        }
-                        MyPin::Quiz18 => {
-                            set_output::spawn(MyPin::Socket18).ok();
-                        }
-                        MyPin::Quiz19 => {
-                            set_output::spawn(MyPin::Socket19).ok();
-                        }
-                        MyPin::Quiz20 => {
-                            set_output::spawn(MyPin::Socket20).ok();
-                        }
-                        MyPin::Quiz21 => {
-                            set_output::spawn(MyPin::Socket21).ok();
-                        }
-                        MyPin::Quiz22 => {
-                            set_output::spawn(MyPin::Socket22).ok();
-                        }
-                        MyPin::Quiz23 => {
-                            set_output::spawn(MyPin::Socket23).ok();
-                        }
-                        MyPin::Quiz24 => {
-                            set_output::spawn(MyPin::Socket24).ok();
-                        }
-                        _ => {}
+                match pin {
+                    MyPin::Quiz01 => {
+                        set_output::spawn(MyPin::Socket01).ok();
                     }
+                    MyPin::Quiz02 => {
+                        set_output::spawn(MyPin::Socket02).ok();
+                    }
+                    MyPin::Quiz03 => {
+                        set_output::spawn(MyPin::Socket03).ok();
+                    }
+                    MyPin::Quiz04 => {
+                        set_output::spawn(MyPin::Socket04).ok();
+                    }
+                    MyPin::Quiz05 => {
+                        set_output::spawn(MyPin::Socket05).ok();
+                    }
+                    MyPin::Quiz06 => {
+                        set_output::spawn(MyPin::Socket06).ok();
+                    }
+                    MyPin::Quiz07 => {
+                        set_output::spawn(MyPin::Socket07).ok();
+                    }
+                    MyPin::Quiz08 => {
+                        set_output::spawn(MyPin::Socket08).ok();
+                    }
+                    MyPin::Quiz09 => {
+                        set_output::spawn(MyPin::Socket09).ok();
+                    }
+                    MyPin::Quiz10 => {
+                        set_output::spawn(MyPin::Socket10).ok();
+                    }
+                    MyPin::Quiz11 => {
+                        set_output::spawn(MyPin::Socket11).ok();
+                    }
+                    MyPin::Quiz12 => {
+                        set_output::spawn(MyPin::Socket12).ok();
+                    }
+                    MyPin::Quiz13 => {
+                        set_output::spawn(MyPin::Socket13).ok();
+                    }
+                    MyPin::Quiz14 => {
+                        set_output::spawn(MyPin::Socket14).ok();
+                    }
+                    MyPin::Quiz15 => {
+                        set_output::spawn(MyPin::Socket15).ok();
+                    }
+                    MyPin::Quiz16 => {
+                        set_output::spawn(MyPin::Socket16).ok();
+                    }
+                    MyPin::Quiz17 => {
+                        set_output::spawn(MyPin::Socket17).ok();
+                    }
+                    MyPin::Quiz18 => {
+                        set_output::spawn(MyPin::Socket18).ok();
+                    }
+                    MyPin::Quiz19 => {
+                        set_output::spawn(MyPin::Socket19).ok();
+                    }
+                    MyPin::Quiz20 => {
+                        set_output::spawn(MyPin::Socket20).ok();
+                    }
+                    MyPin::Quiz21 => {
+                        set_output::spawn(MyPin::Socket21).ok();
+                    }
+                    MyPin::Quiz22 => {
+                        set_output::spawn(MyPin::Socket22).ok();
+                    }
+                    MyPin::Quiz23 => {
+                        set_output::spawn(MyPin::Socket23).ok();
+                    }
+                    MyPin::Quiz24 => {
+                        set_output::spawn(MyPin::Socket24).ok();
+                    }
+                    _ => {}
                 }
             }
-        }
-    }
-
-    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
-    fn set_output(cx: set_output::Context, pin: MyPin) {
-        #[cfg(feature = "ioe0")]
-        {
-            let set_output::SharedResources { ioe0, output, .. } = cx.shared;
-            (ioe0, output).lock(|ioe0_a, output_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                let pin_bits = pin.clone() as u32;
-                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                let out = output_a[chip] | (1u16 << ((pin_bits & 0xFF) as u8));
-                output_a[chip] = out;
-                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-            });
-        }
-    }
-
-    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
-    fn toggle_output(cx: toggle_output::Context, pin: MyPin) {
-        #[cfg(feature = "ioe0")]
-        {
-            let toggle_output::SharedResources { ioe0, output, .. } = cx.shared;
-            (ioe0, output).lock(|ioe0_a, output_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                let pin_bits = pin.clone() as u32;
-                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                let out = output_a[chip] ^ (1u16 << ((pin_bits & 0xFF) as u8));
-                output_a[chip] = out;
-                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-            });
-        }
-    }
-
-    #[task(priority = 1, capacity = 64, shared = [ioe0, output])]
-    fn clear_output(cx: clear_output::Context, pin: MyPin) {
-        #[cfg(feature = "ioe0")]
-        {
-            let clear_output::SharedResources { ioe0, output, .. } = cx.shared;
-            (ioe0, output).lock(|ioe0_a, output_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                let pin_bits = pin.clone() as u32;
-                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                let out = output_a[chip] & (!(1u16 << ((pin_bits & 0xFF) as u8)));
-                output_a[chip] = out;
-                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-            });
-        }
-    }
-
-    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
-    fn out_zero(cx: out_zero::Context) {
-        #[cfg(feature = "ioe0")]
-        {
-            let out_zero::SharedResources { ioe0, output, .. } = cx.shared;
-            (ioe0, output).lock(|ioe0_a, output_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                (0..=7u8).for_each(|i| {
-                    ioe0.0.lock(|drv| drv.write_u16(i, 0).ok());
-                    output_a[i as usize] = 0;
-                });
-            });
-        }
-    }
-
-    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
-    fn out_ones(cx: out_ones::Context) {
-        #[cfg(feature = "ioe0")]
-        {
-            let out_ones::SharedResources { ioe0, output, .. } = cx.shared;
-            (ioe0, output).lock(|ioe0_a, output_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                (0..=7).for_each(|i| {
-                    ioe0.0.lock(|drv| drv.write_u16(i, 0xFFFF).ok());
-                    output_a[i as usize] = 0xFFFF;
-                });
-            });
         }
     }
 
     #[task(priority = 1, capacity = 4, shared = [ioe1, bits, rise, fall])]
     fn io_poll(cx: io_poll::Context) {
-        #[cfg(feature = "ioe1")]
-        {
-            let io_poll::SharedResources {
-                ioe1,
-                bits,
-                rise,
-                fall,
-                ..
-            } = cx.shared;
-            let mut changed = false;
-            let mut fallen = false;
-            (ioe1, bits, rise, fall).lock(|ioe1_a, bits_a, rise_a, fall_a| {
-                let ioe1 = ioe1_a.as_ref().unwrap();
-                (0..=7).for_each(|i| {
-                    ioe1.0.lock(|drv| {
-                        let before = bits_a[i as usize];
-                        let after = drv.read_u16(i).unwrap();
-                        if after != before {
-                            changed = true;
-                            let fallen_bits = before & !after;
-                            if fallen_bits != 0 {
-                                fallen = true;
-                            }
-                            rise_a[i as usize] = !before & after;
-                            fall_a[i as usize] = fallen_bits;
-                            bits_a[i as usize] = after;
+        let io_poll::SharedResources {
+            ioe1,
+            bits,
+            rise,
+            fall,
+            ..
+        } = cx.shared;
+
+        let mut changed = false;
+        let mut fallen = false;
+
+        (ioe1, bits, rise, fall).lock(|ioe1, bits, rise, fall| {
+            (0..=7).for_each(|i| {
+                ioe1.0.lock(|drv| {
+                    let before = bits[i as usize];
+                    let after = drv.read_u16(i).unwrap();
+                    if after != before {
+                        changed = true;
+                        let fallen_bits = before & !after;
+                        if fallen_bits != 0 {
+                            fallen = true;
                         }
-                    });
+                        rise[i as usize] = !before & after;
+                        fall[i as usize] = fallen_bits;
+                        bits[i as usize] = after;
+                    }
                 });
             });
+        });
 
-            if changed {
-                #[cfg(feature = "io_report")]
-                io_report::spawn().ok();
-            }
-            if fallen {
-                #[cfg(feature = "input_id")]
-                input_id::spawn().ok();
-                #[cfg(feature = "in_to_out")]
-                in_to_out::spawn().ok();
-            }
+        #[cfg(feature = "io_debug")]
+        if changed {
+            io_debug::spawn().ok();
+        }
+
+        if fallen {
+            input_event::spawn().ok();
         }
     }
 
     #[task(priority = 1, shared = [ioe0, output, tstate])]
     fn test_output(cx: test_output::Context) {
-        #[cfg(all(feature = "ioe0", feature = "test_output"))]
+        #[cfg(feature = "test_output")]
         {
             let test_output::SharedResources {
                 ioe0,
@@ -787,27 +636,26 @@ mod app {
                 ..
             } = cx.shared;
 
-            (ioe0, output, tstate).lock(|ioe0_a, output_a, tstate_a| {
-                let ioe0 = ioe0_a.as_ref().unwrap();
-                let (test, active) = match *tstate_a {
+            (ioe0, output, tstate).lock(|ioe0, output, tstate| {
+                let (test, active) = match *tstate {
                     OutTestState::Test1 => {
-                        *tstate_a = OutTestState::Test2;
-                        out_zero::spawn_after(2900u64.millis()).ok();
+                        *tstate = OutTestState::Test2;
+                        out_zero::spawn_after(900u64.millis()).ok();
                         (&OUT_TEST1, true)
                     }
                     OutTestState::Test2 => {
-                        *tstate_a = OutTestState::Test3;
-                        out_zero::spawn_after(2900u64.millis()).ok();
+                        *tstate = OutTestState::Test3;
+                        out_zero::spawn_after(900u64.millis()).ok();
                         (&OUT_TEST2, true)
                     }
                     OutTestState::Test3 => {
-                        *tstate_a = OutTestState::Test4;
-                        out_zero::spawn_after(2900u64.millis()).ok();
+                        *tstate = OutTestState::Test4;
+                        out_zero::spawn_after(900u64.millis()).ok();
                         (&OUT_TEST3, true)
                     }
                     OutTestState::Test4 => {
-                        *tstate_a = OutTestState::Idle;
-                        out_zero::spawn_after(2900u64.millis()).ok();
+                        *tstate = OutTestState::Idle;
+                        out_zero::spawn_after(900u64.millis()).ok();
                         (&OUT_TEST4, true)
                     }
                     OutTestState::Idle => (&OUT_TEST4, false),
@@ -817,11 +665,11 @@ mod app {
                     (0..24).for_each(|i| {
                         let pin_bits = test[i].clone() as u32;
                         let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                        let out = output_a[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
-                        output_a[chip] = out;
+                        let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                        output[chip] = out;
                         ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
                     });
-                    test_output::spawn_after(3000u64.millis()).ok();
+                    test_output::spawn_after(1000u64.millis()).ok();
                 }
             });
         }
@@ -830,25 +678,26 @@ mod app {
     #[task(priority = 1, shared = [rand, rng])]
     fn rand_output(cx: rand_output::Context) {
         let rand_output::SharedResources { rand, rng, .. } = cx.shared;
-        (rng,).lock(|rng_a| {
-            if rng_a.is_none() {
-                *rng_a = Some(StdRng::seed_from_u64(monotonics::now().ticks()));
+
+        (rng,).lock(|rng| {
+            if rng.is_none() {
+                *rng = Some(StdRng::seed_from_u64(monotonics::now().ticks()));
             }
 
             let mut r: [u8; 2] = [0; 2];
-            rng_a.as_mut().unwrap().fill_bytes(&mut r);
+            rng.as_mut().unwrap().fill_bytes(&mut r);
             let rpin = pin_input_ident(r[0] & 0x07, r[1] & 0x0F);
             match rpin {
                 MyPin::UnknownPin => {}
                 p => {
-                    // Blink the lamp for 0,5 seconds
+                    // Blink the lamp for 0.5 seconds
                     set_output::spawn(p.clone()).ok();
                     clear_output::spawn_after(500u64.millis(), p).ok();
                 }
             }
         });
-        (rand,).lock(|rand_a| {
-            if *rand_a {
+        (rand,).lock(|rand| {
+            if *rand {
                 rand_output::spawn_after(50u64.millis()).ok();
             }
         });
@@ -856,20 +705,19 @@ mod app {
 
     #[task(priority = 2)]
     fn io_noirq(_cx: io_noirq::Context) {
-        #[cfg(feature = "ioe1")]
         io_poll::spawn().ok();
-
         io_noirq::spawn_after(100u64.millis()).ok();
     }
 
     #[task(priority = 2, capacity = 4, shared = [sw_pin])]
     fn enable_io_irq(cx: enable_io_irq::Context) {
-        #[cfg(feature = "ioe1")]
-        io_poll::spawn().ok();
         let enable_io_irq::SharedResources { sw_pin, .. } = cx.shared;
-        (sw_pin,).lock(|sw_pin_a| {
-            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            sw_pin_a.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, true);
+
+        io_poll::spawn().ok();
+
+        (sw_pin,).lock(|sw_pin| {
+            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, true);
         });
     }
 
@@ -877,16 +725,117 @@ mod app {
     fn io_irq(cx: io_irq::Context) {
         let io_irq::SharedResources { irqc, sw_pin, .. } = cx.shared;
 
-        (irqc, sw_pin).lock(|irqc_a, sw_pin_a| {
-            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            sw_pin_a.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, false);
-            sw_pin_a.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            *irqc_a += 1;
+        (irqc, sw_pin).lock(|irqc, sw_pin| {
+            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, false);
+            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
+            *irqc += 1;
         });
         enable_io_irq::spawn_after(200u64.millis()).ok();
 
-        #[cfg(feature = "ioe1")]
         io_poll::spawn().ok();
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [rand, ioe0, output])]
+    fn easter_egg(cx: easter_egg::Context, pin: MyPin) {
+        let easter_egg::SharedResources {
+            rand, ioe0, output, ..
+        } = cx.shared;
+
+        let (test, test_active) = match pin {
+            MyPin::Quiz01 => (&OUT_TEST1, true),
+            MyPin::Quiz02 => (&OUT_TEST2, true),
+            MyPin::Quiz03 => (&OUT_TEST3, true),
+            MyPin::Quiz04 => (&OUT_TEST4, true),
+            MyPin::Quiz05 => {
+                out_zero::spawn().ok();
+                (&OUT_TEST1, false)
+            }
+            MyPin::Quiz23 => {
+                (rand,).lock(|rand| {
+                    *rand = true;
+                    rand_output::spawn().ok();
+                });
+                (&OUT_TEST1, false)
+            }
+            MyPin::Quiz24 => {
+                (rand,).lock(|rand| {
+                    *rand = false;
+                });
+                (&OUT_TEST1, false)
+            }
+            _ => (&OUT_TEST1, false),
+        };
+
+        if test_active {
+            (output, ioe0).lock(|output, ioe0| {
+                (0..24).for_each(|i| {
+                    let pin_bits = test[i].clone() as u32;
+                    let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                    let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                    output[chip] = out;
+                    ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+                });
+            });
+        }
+    }
+
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
+    fn set_output(cx: set_output::Context, pin: MyPin) {
+        let set_output::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            let pin_bits = pin.clone() as u32;
+            let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+            let out = output[chip] | (1u16 << ((pin_bits & 0xFF) as u8));
+            output[chip] = out;
+            ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+        });
+    }
+
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
+    fn toggle_output(cx: toggle_output::Context, pin: MyPin) {
+        let toggle_output::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            let pin_bits = pin.clone() as u32;
+            let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+            let out = output[chip] ^ (1u16 << ((pin_bits & 0xFF) as u8));
+            output[chip] = out;
+            ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+        });
+    }
+
+    #[task(priority = 1, capacity = 64, shared = [ioe0, output])]
+    fn clear_output(cx: clear_output::Context, pin: MyPin) {
+        let clear_output::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            let pin_bits = pin.clone() as u32;
+            let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+            let out = output[chip] & (!(1u16 << ((pin_bits & 0xFF) as u8)));
+            output[chip] = out;
+            ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+        });
+    }
+
+    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    fn out_zero(cx: out_zero::Context) {
+        let out_zero::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..=7u8).for_each(|i| {
+                ioe0.0.lock(|drv| drv.write_u16(i, 0).ok());
+                output[i as usize] = 0;
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    fn out_ones(cx: out_ones::Context) {
+        let out_ones::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..=7).for_each(|i| {
+                ioe0.0.lock(|drv| drv.write_u16(i, 0xFFFF).ok());
+                output[i as usize] = 0xFFFF;
+            });
+        });
     }
 }
 
