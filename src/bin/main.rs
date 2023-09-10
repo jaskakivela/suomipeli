@@ -8,35 +8,31 @@
 // #![allow(unused_mut)]
 // #![allow(unused_variables)]
 
+use suomipeli::*;
+
 use panic_halt as _;
 
 use core::fmt::Write;
+use cortex_m::asm;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
 use fugit::*;
 use port_expander_multi::{dev::pca9555::Driver, Direction, PortDriver, PortDriverTotemPole};
 use rand::{prelude::*, SeedableRng};
-use rp_pico::hal::{
-    self,
-    gpio::{
-        self, bank0::*, pin::Pin, pin::I2C, Function, FunctionI2C, FunctionUart, Input, PullUp,
-        PushPullOutput,
-    },
-    uart, Clock,
-};
-
-use rp_pico::{hal::pac, XOSC_CRYSTAL_FREQ};
 use shared_bus::BusMutex;
 use systick_monotonic::Systick;
 
-use suomipeli::*;
+use rp_pico::{
+    hal::{self, gpio::bank0::*, gpio::*, pac, uart, Clock},
+    XOSC_CRYSTAL_FREQ,
+};
 
 // Some type porn
-type GPIO12 = Pin<Gpio12, Function<I2C>>;
-type GPIO13 = Pin<Gpio13, Function<I2C>>;
-type GPIO18 = Pin<Gpio18, Function<I2C>>;
-type GPIO19 = Pin<Gpio19, Function<I2C>>;
-type GPIO20 = Pin<Gpio20, Input<PullUp>>;
-type LedPin = Pin<Gpio25, PushPullOutput>;
+type GPIO12 = Pin<Gpio12, FunctionI2c, PullDown>;
+type GPIO13 = Pin<Gpio13, FunctionI2c, PullDown>;
+type GPIO18 = Pin<Gpio18, FunctionI2c, PullDown>;
+type GPIO19 = Pin<Gpio19, FunctionI2c, PullDown>;
+type GPIO20 = Pin<Gpio20, FunctionSio<SioInput>, PullUp>;
+type LedPin = Pin<Gpio25, FunctionSio<SioOutput>, PullDown>;
 
 type MyI2C0 = hal::I2C<pac::I2C0, (GPIO12, GPIO13)>;
 type MyI2C1 = hal::I2C<pac::I2C1, (GPIO18, GPIO19)>;
@@ -50,8 +46,8 @@ type MyUart = uart::UartPeripheral<
     uart::Enabled,
     pac::UART0,
     (
-        Pin<Gpio0, Function<gpio::Uart>>,
-        Pin<Gpio1, Function<gpio::Uart>>,
+        Pin<Gpio0, FunctionUart, PullDown>,
+        Pin<Gpio1, FunctionUart, PullDown>,
     ),
 >;
 
@@ -72,10 +68,6 @@ pub enum EasterEggState {
     Phase3,
     Go,
 }
-
-// type EParts = port_expander_multi::dev::pca9555::Parts<'static, MyI2C>;
-// type IPin = port_expander_multi::Pin<'static, mode::Input, PortExpInner>;
-// type OPin = port_expander_multi::Pin<'static, mode::Output, PortExpInner>;
 
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [RTC_IRQ, XIP_IRQ, TIMER_IRQ_3, TIMER_IRQ_2])]
 mod app {
@@ -113,9 +105,6 @@ mod app {
 
     #[init()]
     fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
-        //*******
-        // Initialization of the system clock.
-
         let dp = c.device;
         let mut resets = dp.RESETS;
         let mut watchdog = hal::watchdog::Watchdog::new(dp.WATCHDOG);
@@ -136,20 +125,19 @@ mod app {
         let systick = c.core.SYST;
         let mono = Systick::new(systick, 125_000_000);
 
-        // Initialize the LED GPIO
-
         let sio = hal::Sio::new(dp.SIO);
         let pins = rp_pico::Pins::new(dp.IO_BANK0, dp.PADS_BANK0, sio.gpio_bank0, &mut resets);
+
+        // Initialize the LED GPIO
         let mut led = pins.led.into_push_pull_output();
         led.set_low().ok();
 
         // Initialize the UART
-
         let uart_pins = (
             // UART TX on pin 1 (GPIO0)
-            pins.gpio0.into_mode::<FunctionUart>(),
+            pins.gpio0.into_function::<FunctionUart>(),
             // UART RX on pin 2 (GPIO1)
-            pins.gpio1.into_mode::<FunctionUart>(),
+            pins.gpio1.into_function::<FunctionUart>(),
         );
         let uart = hal::uart::UartPeripheral::new(dp.UART0, uart_pins, &mut resets)
             .enable(
@@ -173,8 +161,8 @@ mod app {
         uart.write_full_blocking(&buf);
 
         // Configure these pins as being I²C, not GPIO
-        let sda0_pin = pins.gpio12.into_mode::<FunctionI2C>();
-        let scl0_pin = pins.gpio13.into_mode::<FunctionI2C>();
+        let sda0_pin = pins.gpio12.into_function::<FunctionI2C>();
+        let scl0_pin = pins.gpio13.into_function::<FunctionI2C>();
         let i2c0 = hal::I2C::i2c0(
             dp.I2C0,
             sda0_pin,
@@ -183,11 +171,12 @@ mod app {
             &mut resets,
             &clocks.system_clock,
         );
+        // Create ioe0, port expander with output pins
         let ioe0 = port_expander_multi::Pca9555::new_m(i2c0);
 
         // Configure these pins as being I²C, not GPIO
-        let sda1_pin = pins.gpio18.into_mode::<FunctionI2C>();
-        let scl1_pin = pins.gpio19.into_mode::<FunctionI2C>();
+        let sda1_pin = pins.gpio18.into_function::<FunctionI2C>();
+        let scl1_pin = pins.gpio19.into_function::<FunctionI2C>();
         let i2c1 = hal::I2C::i2c1(
             dp.I2C1,
             sda1_pin,
@@ -196,8 +185,10 @@ mod app {
             &mut resets,
             &clocks.system_clock,
         );
+        // Create ioe1, port expander with input pins
         let ioe1 = port_expander_multi::Pca9555::new_m(i2c1);
 
+        // Internal data structures to track pin states & changes
         let mut bits = [0; 8];
         let rise = [0; 8];
         let fall = [0; 8];
@@ -224,7 +215,7 @@ mod app {
             })
         });
 
-        // Deliver the interrupt from PCA9555s into gpio20
+        // We connect the interrupt line _INT from PCA9555s into gpio20
         let sw_pin = pins.gpio20.into_pull_up_input();
 
         #[cfg(feature = "test_output")]
@@ -239,9 +230,6 @@ mod app {
         led_blink::spawn().ok();
         alive::spawn().ok();
 
-        //********
-        // Return the Shared variables struct, the Local variables struct and the XPTO Monitonics
-        //    (Note: Read again the RTIC book in the section of Monotonics timers)
         (
             Shared {
                 led,
@@ -287,6 +275,7 @@ mod app {
     #[idle(local = [x: u32 = 0])]
     fn idle(cx: idle::Context) -> ! {
         loop {
+            asm::wfi();
             *cx.local.x += 1;
         }
     }
@@ -476,83 +465,7 @@ mod app {
                 // ignore unknowns
             } else {
                 set_output::spawn(pin.clone()).ok();
-                clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
-
-                match pin {
-                    MyPin::Quiz01 => {
-                        set_output::spawn(MyPin::Socket01).ok();
-                    }
-                    MyPin::Quiz02 => {
-                        set_output::spawn(MyPin::Socket02).ok();
-                    }
-                    MyPin::Quiz03 => {
-                        set_output::spawn(MyPin::Socket03).ok();
-                    }
-                    MyPin::Quiz04 => {
-                        set_output::spawn(MyPin::Socket04).ok();
-                    }
-                    MyPin::Quiz05 => {
-                        set_output::spawn(MyPin::Socket05).ok();
-                    }
-                    MyPin::Quiz06 => {
-                        set_output::spawn(MyPin::Socket06).ok();
-                    }
-                    MyPin::Quiz07 => {
-                        set_output::spawn(MyPin::Socket07).ok();
-                    }
-                    MyPin::Quiz08 => {
-                        set_output::spawn(MyPin::Socket08).ok();
-                    }
-                    MyPin::Quiz09 => {
-                        set_output::spawn(MyPin::Socket09).ok();
-                    }
-                    MyPin::Quiz10 => {
-                        set_output::spawn(MyPin::Socket10).ok();
-                    }
-                    MyPin::Quiz11 => {
-                        set_output::spawn(MyPin::Socket11).ok();
-                    }
-                    MyPin::Quiz12 => {
-                        set_output::spawn(MyPin::Socket12).ok();
-                    }
-                    MyPin::Quiz13 => {
-                        set_output::spawn(MyPin::Socket13).ok();
-                    }
-                    MyPin::Quiz14 => {
-                        set_output::spawn(MyPin::Socket14).ok();
-                    }
-                    MyPin::Quiz15 => {
-                        set_output::spawn(MyPin::Socket15).ok();
-                    }
-                    MyPin::Quiz16 => {
-                        set_output::spawn(MyPin::Socket16).ok();
-                    }
-                    MyPin::Quiz17 => {
-                        set_output::spawn(MyPin::Socket17).ok();
-                    }
-                    MyPin::Quiz18 => {
-                        set_output::spawn(MyPin::Socket18).ok();
-                    }
-                    MyPin::Quiz19 => {
-                        set_output::spawn(MyPin::Socket19).ok();
-                    }
-                    MyPin::Quiz20 => {
-                        set_output::spawn(MyPin::Socket20).ok();
-                    }
-                    MyPin::Quiz21 => {
-                        set_output::spawn(MyPin::Socket21).ok();
-                    }
-                    MyPin::Quiz22 => {
-                        set_output::spawn(MyPin::Socket22).ok();
-                    }
-                    MyPin::Quiz23 => {
-                        set_output::spawn(MyPin::Socket23).ok();
-                    }
-                    MyPin::Quiz24 => {
-                        set_output::spawn(MyPin::Socket24).ok();
-                    }
-                    _ => {}
-                }
+                clear_output::spawn_after(5000u64.millis(), pin.clone()).ok();
             }
         }
     }
@@ -570,6 +483,7 @@ mod app {
         let mut changed = false;
         let mut fallen = false;
 
+        // We read all input pin states and mark changes since last check
         (ioe1, bits, rise, fall).lock(|ioe1, bits, rise, fall| {
             (0..=7).for_each(|i| {
                 ioe1.0.lock(|drv| {
@@ -577,11 +491,12 @@ mod app {
                     let after = drv.read_u16(i).unwrap();
                     if after != before {
                         changed = true;
+                        let risen_bits = !before & after;
                         let fallen_bits = before & !after;
                         if fallen_bits != 0 {
                             fallen = true;
                         }
-                        rise[i as usize] = !before & after;
+                        rise[i as usize] = risen_bits;
                         fall[i as usize] = fallen_bits;
                         bits[i as usize] = after;
                     }
@@ -595,6 +510,7 @@ mod app {
         }
 
         if fallen {
+            // We only react to falling edges, since inputs are pull-up
             input_event::spawn().ok();
         }
     }
@@ -699,14 +615,18 @@ mod app {
     fn io_irq(cx: io_irq::Context) {
         let io_irq::SharedResources { irqc, sw_pin, .. } = cx.shared;
 
+        // Clear & disable our interrupt immediately to avoid repeated firing
         (irqc, sw_pin).lock(|irqc, sw_pin| {
             sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
             sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, false);
             sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
             *irqc += 1;
         });
+
+        // We are using 200ms debounce period
         enable_io_irq::spawn_after(200u64.millis()).ok();
 
+        // Here we actually check what had changed in input pins
         io_poll::spawn().ok();
     }
 

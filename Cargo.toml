@@ -3,7 +3,7 @@ authors = ["sjm"]
 edition = "2021"
 readme = "README.md"
 name = "suomipeli"
-version = "0.1.1"
+version = "0.1.2"
 resolver = "2"
 
 
@@ -26,7 +26,7 @@ fugit = "0.3"
 # futures = { version = "0.3", default-features = false, optional = true }
 panic-halt = "0.2"
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
-rp-pico = "0.7"
+rp-pico = "0.8"
 rp2040-boot2 = { version = "0.3" }
 # rp2040-hal = { version = "0.7", features = ["rt", "eh1_0_alpha "] }
 # rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", features = ["rt","eh1_0_alpha "] }
