@@ -81,32 +81,6 @@ pub enum EasterEggState {
 mod app {
     use crate::*;
 
-    // IMPORTANT: The USB-Serial with RTIC github project example that I'm following.
-    //            I tried to use the Pico board examples of USB-Serial (without interrupts
-    //            and with interrupts with success, but when using with RTIC I could not make
-    //            it work when merged with the RTIC example.) So I asked some questions
-    //            in the in Matrix chat and received links to examples of there github
-    //            project where it was working, then a used and adapted some parts there
-    //            in this project template.
-    //            This were the kind folks that helped me in the Matrix chat, the 3 projects
-    //            that they suggest me to study are good examples of programs made with RTIC
-    //            and USB and should be studied.
-    //
-    // Paul Daniel Faria
-    // https://github.com/Nashenas88/dactyl-manuform-kb2040-rs/blob/main/src/main.rs#L80
-    //
-    // see also:
-    // korken89
-    // https://github.com/korken89/pico-probe/tree/master/src
-    //
-    // see also:
-    // Mathias
-    // https://github.com/mgottschlag/rp2040-usb-sound-card/blob/b8078b57361c1b08755e5ab5f9992c56457ec18b/src/main.rs#L188
-    //
-    //
-    // Global Static variable, has to be written inside unsafe blocks.
-    // A reference can be obtained with as_ref() method.
-
     #[shared]
     struct Shared {
         led: LedPin,
@@ -172,9 +146,9 @@ mod app {
         // Initialize the UART
 
         let uart_pins = (
-            // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
+            // UART TX on pin 1 (GPIO0)
             pins.gpio0.into_mode::<FunctionUart>(),
-            // UART RX (characters received by RP2040) on pin 2 (GPIO1)
+            // UART RX on pin 2 (GPIO1)
             pins.gpio1.into_mode::<FunctionUart>(),
         );
         let uart = hal::uart::UartPeripheral::new(dp.UART0, uart_pins, &mut resets)
