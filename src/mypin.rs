@@ -1,11 +1,13 @@
 // mypin.rs
 
+// We have 8*16 input pins and 8*16 output pins on separate i2c buses.
+
 // NOTE: we use hex encoding in enum values:
-// 0x0008_050c is
-// 00 = input chip
-// 12 = input pin
-// 05 = output chip
-// 0c = output pin
+// 0x0008_050c means
+// 00 = input chip address (00-07)
+// 12 = input pin# (00-0f)
+// 05 = output chip address (00-07)
+// 0c = output pin# (00-0f)
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Debug, PartialEq)]
@@ -119,7 +121,10 @@ pub enum MyPin {
     Socket23 = 0x050e_060e,
     Socket24 = 0x050f_060f,
 
-    UnknownPin = 0xffff,
+    Mode01 = 0x070f_ffff,  // intput only
+    Relay01 = 0xffff_0300, // output only
+
+    UnknownPin = 0xffff_ffff,
 }
 
 pub fn pin_input_ident(chip: u8, pin: u8) -> MyPin {
@@ -253,107 +258,8 @@ pub fn pin_input_ident(chip: u8, pin: u8) -> MyPin {
             _ => MyPin::UnknownPin,
         },
 
-        _ => MyPin::UnknownPin,
-    }
-}
-
-pub fn pin_output_ident(chip: u8, pin: u8) -> MyPin {
-    match chip {
-        0x00 => match pin {
-            0x00 => MyPin::Map01_Tammisaari,
-            0x01 => MyPin::Map02_Helsinki,
-            0x02 => MyPin::Map03_Porvoo,
-            0x03 => MyPin::Map04_Kotka,
-            0x04 => MyPin::Map05_Turku,
-            0x05 => MyPin::Map06_Lahti,
-            0x06 => MyPin::Map07_Hämeenlinna,
-            0x07 => MyPin::Map08_Lappeenranta,
-
-            0x08 => MyPin::Map09_Rauma,
-            0x09 => MyPin::Map10_Pori,
-            0x0a => MyPin::Map11_Tampere,
-            0x0b => MyPin::Map12_Mikkeli,
-            0x0c => MyPin::Map13_Savonlinna,
-            0x0d => MyPin::Map14_Varkaus,
-            0x0e => MyPin::Map15_Jyväskylä,
-            0x0f => MyPin::Map16_Vilppula,
-
-            _ => MyPin::UnknownPin,
-        },
-        0x01 => match pin {
-            0x00 => MyPin::Map17_Isojoki,
-            0x01 => MyPin::Map18_Joensuu,
-            0x02 => MyPin::Map19_Ilomantsi,
-            0x03 => MyPin::Map20_Kuopio,
-            0x04 => MyPin::Map21_Viitasaari,
-            0x05 => MyPin::Map22_Ähtäri,
-            0x06 => MyPin::Map23_Seinäjoki,
-            0x07 => MyPin::Map24_Vaasa,
-
-            0x08 => MyPin::Map25_Kaustinen,
-            0x09 => MyPin::Map26_Kokkola,
-            0x0a => MyPin::Map27_Nivala,
-            0x0b => MyPin::Map28_Iisalmi,
-            0x0c => MyPin::Map29_Nurmes,
-            0x0d => MyPin::Map30_Lieksa,
-            0x0e => MyPin::Map31_Kuhmo,
-            0x0f => MyPin::Map32_Kajaani,
-
-            _ => MyPin::UnknownPin,
-        },
-        0x02 => match pin {
-            0x00 => MyPin::Map33_Raahe,
-            0x01 => MyPin::Map34_Oulu,
-            0x02 => MyPin::Map35_Suomussalmi,
-            0x03 => MyPin::Map36_Pudasjärvi,
-            0x04 => MyPin::Map37_Kemi,
-            0x05 => MyPin::Map38_Aavasaksa,
-            0x06 => MyPin::Map39_Kuusamo,
-            0x07 => MyPin::Map40_Rovaniemi,
-
-            0x08 => MyPin::Map41_Kemijärvi,
-            0x09 => MyPin::Map42_Salla,
-            0x0a => MyPin::Map43_Sodankylä,
-            0x0b => MyPin::Map44_Muonio,
-            0x0c => MyPin::Map45_Korvatunturi,
-            0x0d => MyPin::Map46_Inari,
-            0x0e => MyPin::Map47_Utsjoki,
-            0x0f => MyPin::Map48_Kilpisjärvi,
-
-            _ => MyPin::UnknownPin,
-        },
-
-        0x04 => match pin {
-            0x00 => MyPin::Quiz01,
-            0x01 => MyPin::Quiz02,
-            0x02 => MyPin::Quiz03,
-            0x03 => MyPin::Quiz04,
-            0x04 => MyPin::Quiz05,
-            0x05 => MyPin::Quiz06,
-            0x06 => MyPin::Quiz07,
-            0x07 => MyPin::Quiz08,
-
-            0x08 => MyPin::Quiz09,
-            0x09 => MyPin::Quiz10,
-            0x0a => MyPin::Quiz11,
-            0x0b => MyPin::Quiz12,
-            0x0c => MyPin::Quiz13,
-            0x0d => MyPin::Quiz14,
-            0x0e => MyPin::Quiz15,
-            0x0f => MyPin::Quiz16,
-
-            _ => MyPin::UnknownPin,
-        },
-        0x05 => match pin {
-            0x00 => MyPin::Quiz17,
-            0x01 => MyPin::Quiz18,
-            0x02 => MyPin::Quiz19,
-            0x03 => MyPin::Quiz20,
-            0x04 => MyPin::Quiz21,
-            0x05 => MyPin::Quiz22,
-            0x06 => MyPin::Quiz23,
-            0x07 => MyPin::Quiz24,
-
+        0x07 => match pin {
+            0x0f => MyPin::Mode01,
             _ => MyPin::UnknownPin,
         },
 
@@ -361,7 +267,7 @@ pub fn pin_output_ident(chip: u8, pin: u8) -> MyPin {
     }
 }
 
-pub const OUT_TEST1: [MyPin; 24] = [
+pub const OUT_TEST_QUIZ: [MyPin; 24] = [
     MyPin::Quiz01,
     MyPin::Quiz02,
     MyPin::Quiz03,
@@ -388,7 +294,7 @@ pub const OUT_TEST1: [MyPin; 24] = [
     MyPin::Quiz24,
 ];
 
-pub const OUT_TEST2: [MyPin; 24] = [
+pub const OUT_TEST_MAP_S: [MyPin; 24] = [
     MyPin::Map01_Tammisaari,
     MyPin::Map02_Helsinki,
     MyPin::Map03_Porvoo,
@@ -415,7 +321,7 @@ pub const OUT_TEST2: [MyPin; 24] = [
     MyPin::Map24_Vaasa,
 ];
 
-pub const OUT_TEST3: [MyPin; 24] = [
+pub const OUT_TEST_MAP_N: [MyPin; 24] = [
     MyPin::Map25_Kaustinen,
     MyPin::Map26_Kokkola,
     MyPin::Map27_Nivala,
@@ -442,7 +348,7 @@ pub const OUT_TEST3: [MyPin; 24] = [
     MyPin::Map48_Kilpisjärvi,
 ];
 
-pub const OUT_TEST4: [MyPin; 24] = [
+pub const OUT_TEST_SOCKET: [MyPin; 24] = [
     MyPin::Socket01,
     MyPin::Socket02,
     MyPin::Socket03,

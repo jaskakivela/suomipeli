@@ -54,10 +54,10 @@ type MyUart = uart::UartPeripheral<
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutTestState {
     Idle,
-    Test1,
-    Test2,
-    Test3,
-    Test4,
+    TestQuiz,
+    TestMapS,
+    TestMapN,
+    TestSocket,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -67,6 +67,14 @@ pub enum EasterEggState {
     Phase2,
     Phase3,
     Go,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GameMode {
+    None,
+    MapQuiz1,
+    MapQuiz2,
+    Quiz,
 }
 
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [RTC_IRQ, XIP_IRQ, TIMER_IRQ_3, TIMER_IRQ_2])]
@@ -92,6 +100,7 @@ mod app {
 
         tstate: OutTestState,
         estate: EasterEggState,
+        gmode: GameMode,
 
         rand: bool,
         rng: Option<StdRng>,
@@ -246,8 +255,9 @@ mod app {
                 fall,
                 output,
 
-                tstate: OutTestState::Test1,
+                tstate: OutTestState::TestQuiz,
                 estate: EasterEggState::Start,
+                gmode: GameMode::None,
 
                 rand: false,
                 rng: None,
@@ -385,11 +395,15 @@ mod app {
         }
     }
 
-    #[task(priority = 1, capacity = 4, shared = [fall, estate, irqc, uart])]
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output, fall, rise, estate, gmode, irqc, uart])]
     fn input_event(cx: input_event::Context) {
         let input_event::SharedResources {
+            ioe0,
+            output,
             fall,
+            rise,
             estate,
+            gmode,
             irqc,
             uart,
             ..
@@ -397,6 +411,50 @@ mod app {
 
         let mut edge_low = false;
         let (mut chip, mut bit) = (0, 0);
+
+        (rise, gmode).lock(|rise, gmode| {
+            if rise[7] != 0 {
+                (chip, bit) = which_bit(rise);
+                let pin = pin_input_ident(chip, bit);
+                // Has the MODE switch been pressed?
+                if let MyPin::Mode01 = pin {
+                    let lamps = match *gmode {
+                        GameMode::None => {
+                            *gmode = GameMode::MapQuiz1;
+                            &OUT_TEST_SOCKET
+                        }
+                        GameMode::MapQuiz1 => {
+                            *gmode = GameMode::MapQuiz2;
+                            &OUT_TEST_MAP_S
+                        }
+                        GameMode::MapQuiz2 => {
+                            *gmode = GameMode::Quiz;
+                            &OUT_TEST_MAP_N
+                        }
+                        GameMode::Quiz => {
+                            *gmode = GameMode::None;
+                            &OUT_TEST_QUIZ
+                        }
+                    };
+
+                    (ioe0, output).lock(|ioe0, output| {
+                        (0..24).for_each(|i| {
+                            let pin_bits = lamps[i].clone() as u32;
+                            let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                            let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                            output[chip] = out;
+                            ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+                        });
+                    });
+                    // Make audible feedback
+                    set_output::spawn(MyPin::Relay01).ok();
+                    set_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+
+                    out_zero::spawn_after(900u64.millis()).ok();
+                    return;
+                }
+            }
+        });
 
         (fall,).lock(|fall| {
             (0..=7).for_each(|i| {
@@ -407,6 +465,7 @@ mod app {
             });
         });
 
+        // Have any contacts been touched?
         if edge_low {
             let pin = pin_input_ident(chip, bit);
 
@@ -461,11 +520,18 @@ mod app {
                 }
             });
 
-            if let MyPin::UnknownPin = pin {
-                // ignore unknowns
-            } else {
-                set_output::spawn(pin.clone()).ok();
-                clear_output::spawn_after(5000u64.millis(), pin.clone()).ok();
+            match pin {
+                MyPin::Mode01 | MyPin::UnknownPin => {
+                    // ignore these
+                }
+                _ => {
+                    // Make audible feedback
+                    set_output::spawn(MyPin::Relay01).ok();
+                    set_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+
+                    set_output::spawn(pin.clone()).ok();
+                    clear_output::spawn_after(5000u64.millis(), pin.clone()).ok();
+                }
             }
         }
     }
@@ -528,27 +594,23 @@ mod app {
 
             (ioe0, output, tstate).lock(|ioe0, output, tstate| {
                 let (test, active) = match *tstate {
-                    OutTestState::Test1 => {
-                        *tstate = OutTestState::Test2;
-                        out_zero::spawn_after(900u64.millis()).ok();
-                        (&OUT_TEST1, true)
+                    OutTestState::TestQuiz => {
+                        *tstate = OutTestState::TestMapS;
+                        (&OUT_TEST_QUIZ, true)
                     }
-                    OutTestState::Test2 => {
-                        *tstate = OutTestState::Test3;
-                        out_zero::spawn_after(900u64.millis()).ok();
-                        (&OUT_TEST2, true)
+                    OutTestState::TestMapS => {
+                        *tstate = OutTestState::TestMapN;
+                        (&OUT_TEST_MAP_S, true)
                     }
-                    OutTestState::Test3 => {
-                        *tstate = OutTestState::Test4;
-                        out_zero::spawn_after(900u64.millis()).ok();
-                        (&OUT_TEST3, true)
+                    OutTestState::TestMapN => {
+                        *tstate = OutTestState::TestSocket;
+                        (&OUT_TEST_MAP_N, true)
                     }
-                    OutTestState::Test4 => {
+                    OutTestState::TestSocket => {
                         *tstate = OutTestState::Idle;
-                        out_zero::spawn_after(900u64.millis()).ok();
-                        (&OUT_TEST4, true)
+                        (&OUT_TEST_SOCKET, true)
                     }
-                    OutTestState::Idle => (&OUT_TEST4, false),
+                    OutTestState::Idle => (&OUT_TEST_SOCKET, false),
                 };
 
                 if active {
@@ -559,6 +621,7 @@ mod app {
                         output[chip] = out;
                         ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
                     });
+                    out_zero::spawn_after(900u64.millis()).ok();
                     test_output::spawn_after(1000u64.millis()).ok();
                 }
             });
@@ -637,28 +700,28 @@ mod app {
         } = cx.shared;
 
         let (test, test_active) = match pin {
-            MyPin::Quiz01 => (&OUT_TEST1, true),
-            MyPin::Quiz02 => (&OUT_TEST2, true),
-            MyPin::Quiz03 => (&OUT_TEST3, true),
-            MyPin::Quiz04 => (&OUT_TEST4, true),
+            MyPin::Quiz01 => (&OUT_TEST_QUIZ, true),
+            MyPin::Quiz02 => (&OUT_TEST_MAP_S, true),
+            MyPin::Quiz03 => (&OUT_TEST_MAP_N, true),
+            MyPin::Quiz04 => (&OUT_TEST_SOCKET, true),
             MyPin::Quiz05 => {
                 out_zero::spawn().ok();
-                (&OUT_TEST1, false)
+                (&OUT_TEST_QUIZ, false)
             }
             MyPin::Quiz23 => {
                 (rand,).lock(|rand| {
                     *rand = true;
                     rand_output::spawn().ok();
                 });
-                (&OUT_TEST1, false)
+                (&OUT_TEST_QUIZ, false)
             }
             MyPin::Quiz24 => {
                 (rand,).lock(|rand| {
                     *rand = false;
                 });
-                (&OUT_TEST1, false)
+                (&OUT_TEST_QUIZ, false)
             }
-            _ => (&OUT_TEST1, false),
+            _ => (&OUT_TEST_QUIZ, false),
         };
 
         if test_active {
