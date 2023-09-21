@@ -121,8 +121,9 @@ pub enum MyPin {
     Socket23 = 0x050e_060e,
     Socket24 = 0x050f_060f,
 
-    Mode01 = 0x070f_ffff,  // intput only
     Relay01 = 0xffff_0300, // output only
+    Bell01 = 0xffff_0301,  // output only
+    Mode01 = 0x070f_ffff,  // intput only
 
     UnknownPin = 0xffff_ffff,
 }

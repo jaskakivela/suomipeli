@@ -160,10 +160,10 @@ mod app {
             )
             .unwrap();
         let mut buf = [0u8; 80];
-        writeln!(
+        write!(
             Wrapper::new(&mut buf),
-            "*** Starting up Suomipeli\r\n\
-            \x20   firmware v{}\r\n\r",
+            "\r\n\r\n*** Starting up Suomipeli\r\n\
+            \x20   firmware v{}\r\n\r\n",
             env!("CARGO_PKG_VERSION")
         )
         .ok();
@@ -315,9 +315,9 @@ mod app {
         let mut buf = [0u8; 64];
 
         (irqc, sw_pin).lock(|irqc, sw_pin| {
-            writeln!(
+            write!(
                 Wrapper::new(&mut buf),
-                "irqc = {}, swpin = {}\r",
+                "irqc = {}, swpin = {}\r\n",
                 *irqc,
                 sw_pin.is_high().unwrap() as u8
             )
@@ -331,6 +331,99 @@ mod app {
         alive::spawn_after(5000u64.millis()).ok();
     }
 
+    #[task(priority = 2)]
+    fn io_noirq(_cx: io_noirq::Context) {
+        io_poll::spawn().ok();
+        io_noirq::spawn_after(100u64.millis()).ok();
+    }
+
+    #[task(binds = IO_IRQ_BANK0, priority = 3, shared = [irqc, sw_pin])]
+    fn io_irq(cx: io_irq::Context) {
+        let io_irq::SharedResources { irqc, sw_pin, .. } = cx.shared;
+
+        // Clear & disable our interrupt immediately to avoid repeated firing
+        (irqc, sw_pin).lock(|irqc, sw_pin| {
+            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::EdgeLow, false);
+            sw_pin.clear_interrupt(hal::gpio::Interrupt::EdgeLow);
+            *irqc += 1;
+        });
+
+        // We are using 200ms debounce period
+        enable_io_irq::spawn_after(200u64.millis()).ok();
+
+        // Here we actually check what had changed in input pins
+        io_poll::spawn().ok();
+    }
+
+    #[task(priority = 2, capacity = 4, shared = [sw_pin])]
+    fn enable_io_irq(cx: enable_io_irq::Context) {
+        let enable_io_irq::SharedResources { sw_pin, .. } = cx.shared;
+
+        io_poll::spawn().ok();
+
+        (sw_pin,).lock(|sw_pin| {
+            sw_pin.clear_interrupt(hal::gpio::Interrupt::EdgeLow);
+            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::EdgeLow, true);
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe1, bits, rise, fall])]
+    fn io_poll(cx: io_poll::Context) {
+        let io_poll::SharedResources {
+            ioe1,
+            bits,
+            rise,
+            fall,
+            ..
+        } = cx.shared;
+
+        let mut changed = false;
+        let mut fallen = false;
+        let mut risen = false;
+
+        // We read all input pin states and mark changes since last check'
+        // Note: reading all pins will also clear _INT state on PCA9555
+        (ioe1, bits, rise, fall).lock(|ioe1, bits, rise, fall| {
+            (0..=7).for_each(|i| {
+                ioe1.0.lock(|drv| {
+                    let before = bits[i];
+                    let after = drv.read_u16(i as u8).unwrap();
+                    bits[i] = after;
+                    rise[i] = 0;
+                    fall[i] = 0;
+
+                    if after != before {
+                        changed = true;
+
+                        let risen_bits = !before & after;
+                        if risen_bits != 0 {
+                            risen = true;
+                            rise[i] = risen_bits;
+                        }
+
+                        let fallen_bits = before & !after;
+                        if fallen_bits != 0 {
+                            fallen = true;
+                            fall[i] = fallen_bits;
+                        }
+                    }
+                });
+            });
+        });
+
+        if fallen {
+            input_event_fall::spawn().ok();
+        }
+        if risen {
+            input_event_rise::spawn().ok();
+        }
+
+        #[cfg(feature = "io_debug")]
+        if changed {
+            io_debug::spawn().ok();
+        }
+    }
+
     #[task(priority = 1, capacity = 4, shared = [bits, rise, fall, uart])]
     fn io_debug(cx: io_debug::Context) {
         let io_debug::SharedResources {
@@ -341,69 +434,48 @@ mod app {
             ..
         } = cx.shared;
 
-        let mut buf = [0u8; 320];
-        let mut change0 = false;
-        let mut change1 = false;
+        let mut buf = [0u8; 512];
+        let mut w = Wrapper::new(&mut buf);
+        write!(w, "bits0: ").ok();
 
-        (bits, rise, fall).lock(|_bits, rise, fall| {
+        (bits, rise, fall).lock(|bits, rise, fall| {
             (0..=3).for_each(|i| {
-                if rise[i] != 0 || fall[i] != 0 {
-                    change0 = true;
-                }
+                write!(w, " {:016b}", bits[i]).ok();
             });
+            write!(w, "\r\nfall0: ").ok();
+            (0..=3).for_each(|i| {
+                write!(w, " {:016b}", fall[i]).ok();
+            });
+            write!(w, "\r\nrise0: ").ok();
+            (0..=3).for_each(|i| {
+                write!(w, " {:016b}", rise[i]).ok();
+            });
+
+            write!(w, "\r\n\r\nbits1: ").ok();
             (4..=7).for_each(|i| {
-                if rise[i] != 0 || fall[i] != 0 {
-                    change1 = true;
-                }
+                write!(w, " {:016b}", bits[i]).ok();
             });
-
-            let mut w = Wrapper::new(&mut buf);
-            if change0 {
-                writeln!(
-                    w,
-                    "Rise0: {:016b} {:016b} {:016b} {:016b}\r",
-                    rise[0], rise[1], rise[2], rise[3]
-                )
-                .ok();
-                writeln!(
-                    w,
-                    "Fall0: {:016b} {:016b} {:016b} {:016b}\r\n\r",
-                    fall[0], fall[1], fall[2], fall[3]
-                )
-                .ok();
-            }
-            if change1 {
-                writeln!(
-                    w,
-                    "Rise1: {:016b} {:016b} {:016b} {:016b}\r",
-                    rise[4], rise[5], rise[6], rise[7]
-                )
-                .ok();
-                writeln!(
-                    w,
-                    "Fall1: {:016b} {:016b} {:016b} {:016b}\r\n\r",
-                    fall[4], fall[5], fall[6], fall[7]
-                )
-                .ok();
-            }
+            write!(w, "\r\nfall1: ").ok();
+            (4..=7).for_each(|i| {
+                write!(w, " {:016b}", fall[i]).ok();
+            });
+            write!(w, "\r\nrise1: ").ok();
+            (4..=7).for_each(|i| {
+                write!(w, " {:016b}", rise[i]).ok();
+            });
         });
+        write!(w, "\r\n\r\n").ok();
 
-        if !buf.is_empty() {
-            (uart,).lock(|uart| {
-                uart.write_full_blocking(&buf);
-            });
-        }
+        (uart,).lock(|uart| {
+            uart.write_full_blocking(&buf);
+        });
     }
 
-    #[task(priority = 1, capacity = 4, shared = [ioe0, output, fall, rise, estate, gmode, irqc, uart])]
-    fn input_event(cx: input_event::Context) {
-        let input_event::SharedResources {
-            ioe0,
-            output,
+    #[task(priority = 1, capacity = 8, shared = [fall, estate, irqc, uart])]
+    fn input_event_fall(cx: input_event_fall::Context) {
+        let input_event_fall::SharedResources {
             fall,
-            rise,
             estate,
-            gmode,
             irqc,
             uart,
             ..
@@ -411,50 +483,6 @@ mod app {
 
         let mut edge_low = false;
         let (mut chip, mut bit) = (0, 0);
-
-        (rise, gmode).lock(|rise, gmode| {
-            if rise[7] != 0 {
-                (chip, bit) = which_bit(rise);
-                let pin = pin_input_ident(chip, bit);
-                // Has the MODE switch been pressed?
-                if let MyPin::Mode01 = pin {
-                    let lamps = match *gmode {
-                        GameMode::None => {
-                            *gmode = GameMode::MapQuiz1;
-                            &OUT_TEST_SOCKET
-                        }
-                        GameMode::MapQuiz1 => {
-                            *gmode = GameMode::MapQuiz2;
-                            &OUT_TEST_MAP_S
-                        }
-                        GameMode::MapQuiz2 => {
-                            *gmode = GameMode::Quiz;
-                            &OUT_TEST_MAP_N
-                        }
-                        GameMode::Quiz => {
-                            *gmode = GameMode::None;
-                            &OUT_TEST_QUIZ
-                        }
-                    };
-
-                    (ioe0, output).lock(|ioe0, output| {
-                        (0..24).for_each(|i| {
-                            let pin_bits = lamps[i].clone() as u32;
-                            let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                            let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
-                            output[chip] = out;
-                            ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-                        });
-                    });
-                    // Make audible feedback
-                    set_output::spawn(MyPin::Relay01).ok();
-                    set_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
-
-                    out_zero::spawn_after(900u64.millis()).ok();
-                    return;
-                }
-            }
-        });
 
         (fall,).lock(|fall| {
             (0..=7).for_each(|i| {
@@ -475,12 +503,7 @@ mod app {
                 let mut w = Wrapper::new(&mut buf);
 
                 (irqc,).lock(|irqc| {
-                    writeln!(
-                        w,
-                        "Input: chip {chip} bit {bit} irqc: {} ident: {pin:?}\r\n\r",
-                        *irqc
-                    )
-                    .ok();
+                    write!(w, "Falling edge: c{chip} b{bit} c{} {pin:?}\r\n\r\n", *irqc).ok();
                 });
                 (uart,).lock(|uart| {
                     uart.write_full_blocking(&buf);
@@ -527,57 +550,94 @@ mod app {
                 _ => {
                     // Make audible feedback
                     set_output::spawn(MyPin::Relay01).ok();
-                    set_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+                    clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
 
                     set_output::spawn(pin.clone()).ok();
-                    clear_output::spawn_after(5000u64.millis(), pin.clone()).ok();
+                    clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
                 }
             }
         }
     }
 
-    #[task(priority = 1, capacity = 4, shared = [ioe1, bits, rise, fall])]
-    fn io_poll(cx: io_poll::Context) {
-        let io_poll::SharedResources {
-            ioe1,
-            bits,
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output, rise, gmode, irqc, uart])]
+    fn input_event_rise(cx: input_event_rise::Context) {
+        let input_event_rise::SharedResources {
+            ioe0,
+            output,
             rise,
-            fall,
+            gmode,
+            irqc,
+            uart,
             ..
         } = cx.shared;
 
-        let mut changed = false;
-        let mut fallen = false;
+        let mut edge_high = false;
+        let (mut chip, mut bit) = (0, 0);
 
-        // We read all input pin states and mark changes since last check
-        (ioe1, bits, rise, fall).lock(|ioe1, bits, rise, fall| {
+        (rise,).lock(|rise| {
             (0..=7).for_each(|i| {
-                ioe1.0.lock(|drv| {
-                    let before = bits[i as usize];
-                    let after = drv.read_u16(i).unwrap();
-                    if after != before {
-                        changed = true;
-                        let risen_bits = !before & after;
-                        let fallen_bits = before & !after;
-                        if fallen_bits != 0 {
-                            fallen = true;
-                        }
-                        rise[i as usize] = risen_bits;
-                        fall[i as usize] = fallen_bits;
-                        bits[i as usize] = after;
-                    }
-                });
+                if rise[i] != 0 {
+                    edge_high = true;
+                    (chip, bit) = which_bit(rise);
+                }
             });
         });
 
-        #[cfg(feature = "io_debug")]
-        if changed {
-            io_debug::spawn().ok();
-        }
+        if edge_high {
+            let pin = pin_input_ident(chip, bit);
 
-        if fallen {
-            // We only react to falling edges, since inputs are pull-up
-            input_event::spawn().ok();
+            #[cfg(feature = "input_debug")]
+            {
+                let mut buf = [0u8; 80];
+                let mut w = Wrapper::new(&mut buf);
+
+                (irqc,).lock(|irqc| {
+                    write!(w, "Rising edge: c{chip} b{bit} c{} {pin:?}\r\n\r\n", *irqc).ok();
+                });
+                (uart,).lock(|uart| {
+                    uart.write_full_blocking(&buf);
+                });
+            }
+
+            if let MyPin::Mode01 = pin {
+                let lamps = (gmode,).lock(|gmode| {
+                    // Has the MODE switch been pressed?
+
+                    match *gmode {
+                        GameMode::None => {
+                            *gmode = GameMode::MapQuiz1;
+                            &OUT_TEST_SOCKET
+                        }
+                        GameMode::MapQuiz1 => {
+                            *gmode = GameMode::MapQuiz2;
+                            &OUT_TEST_MAP_S
+                        }
+                        GameMode::MapQuiz2 => {
+                            *gmode = GameMode::Quiz;
+                            &OUT_TEST_MAP_N
+                        }
+                        GameMode::Quiz => {
+                            *gmode = GameMode::None;
+                            &OUT_TEST_QUIZ
+                        }
+                    }
+                });
+
+                (ioe0, output).lock(|ioe0, output| {
+                    (0..24).for_each(|i| {
+                        let pin_bits = lamps[i].clone() as u32;
+                        let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                        let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                        output[chip] = out;
+                        ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+                    });
+                });
+                out_zero::spawn_after(900u64.millis()).ok();
+
+                // Make audible feedback
+                set_output::spawn(MyPin::Bell01).ok();
+                clear_output::spawn_after(100u64.millis(), MyPin::Bell01).ok();
+            }
         }
     }
 
@@ -656,44 +716,7 @@ mod app {
         });
     }
 
-    #[task(priority = 2)]
-    fn io_noirq(_cx: io_noirq::Context) {
-        io_poll::spawn().ok();
-        io_noirq::spawn_after(100u64.millis()).ok();
-    }
-
-    #[task(priority = 2, capacity = 4, shared = [sw_pin])]
-    fn enable_io_irq(cx: enable_io_irq::Context) {
-        let enable_io_irq::SharedResources { sw_pin, .. } = cx.shared;
-
-        io_poll::spawn().ok();
-
-        (sw_pin,).lock(|sw_pin| {
-            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, true);
-        });
-    }
-
-    #[task(binds = IO_IRQ_BANK0, priority = 3, shared = [irqc, sw_pin])]
-    fn io_irq(cx: io_irq::Context) {
-        let io_irq::SharedResources { irqc, sw_pin, .. } = cx.shared;
-
-        // Clear & disable our interrupt immediately to avoid repeated firing
-        (irqc, sw_pin).lock(|irqc, sw_pin| {
-            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            sw_pin.set_interrupt_enabled(hal::gpio::Interrupt::LevelLow, false);
-            sw_pin.clear_interrupt(hal::gpio::Interrupt::LevelLow);
-            *irqc += 1;
-        });
-
-        // We are using 200ms debounce period
-        enable_io_irq::spawn_after(200u64.millis()).ok();
-
-        // Here we actually check what had changed in input pins
-        io_poll::spawn().ok();
-    }
-
-    #[task(priority = 1, capacity = 4, shared = [rand, ioe0, output])]
+    #[task(priority = 1, shared = [rand, ioe0, output])]
     fn easter_egg(cx: easter_egg::Context, pin: MyPin) {
         let easter_egg::SharedResources {
             rand, ioe0, output, ..
@@ -773,7 +796,7 @@ mod app {
         });
     }
 
-    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
     fn out_zero(cx: out_zero::Context) {
         let out_zero::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
@@ -784,7 +807,7 @@ mod app {
         });
     }
 
-    #[task(priority = 1, capacity = 2, shared = [ioe0, output])]
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
     fn out_ones(cx: out_ones::Context) {
         let out_ones::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {

@@ -3,7 +3,7 @@ authors = ["sjm"]
 edition = "2021"
 readme = "README.md"
 name = "suomipeli"
-version = "0.1.3"
+version = "0.1.5"
 resolver = "2"
 
 
