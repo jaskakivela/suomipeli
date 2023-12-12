@@ -101,7 +101,9 @@ mod app {
         tstate: OutTestState,
         estate: EasterEggState,
         gmode: GameMode,
-
+        socket: Option<MyPin>,
+        socket_i: Option<usize>,
+        answers: [Option<MyPin>; 24],
         rand: bool,
         rng: Option<StdRng>,
     }
@@ -258,7 +260,9 @@ mod app {
                 tstate: OutTestState::TestQuiz,
                 estate: EasterEggState::Start,
                 gmode: GameMode::None,
-
+                answers: [None; 24],
+                socket: None,
+                socket_i: None,
                 rand: false,
                 rng: None,
             },
@@ -471,11 +475,15 @@ mod app {
         });
     }
 
-    #[task(priority = 1, capacity = 8, shared = [fall, estate, irqc, uart])]
+    #[task(priority = 1, capacity = 8, shared = [fall, estate, gmode, socket, socket_i, answers, irqc, uart])]
     fn input_event_fall(cx: input_event_fall::Context) {
         let input_event_fall::SharedResources {
             fall,
             estate,
+            gmode,
+            socket,
+            socket_i,
+            answers,
             irqc,
             uart,
             ..
@@ -539,33 +547,59 @@ mod app {
                 }
                 EasterEggState::Go => {
                     *estate = EasterEggState::Start;
-                    easter_egg::spawn(pin.clone()).ok();
+                    easter_egg::spawn(pin).ok();
                 }
             });
 
-            match pin {
-                MyPin::Mode01 | MyPin::UnknownPin => {
-                    // ignore these
-                }
-                _ => {
-                    // Make audible feedback
-                    set_output::spawn(MyPin::Relay01).ok();
-                    clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+            (gmode, socket, socket_i, answers).lock(|gmode, socket, socket_i, answers| {
+                match pin {
+                    MyPin::Mode01 | MyPin::UnknownPin => {
+                        // ignore these
+                    }
+                    _ => {
+                        // Make audible feedback
+                        set_output::spawn(MyPin::Relay01).ok();
+                        clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
 
-                    set_output::spawn(pin.clone()).ok();
-                    clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
-                }
-            }
+                        /*
+                        set_output::spawn(pin.clone()).ok();
+                        clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
+                        */
+
+                        if let Some(i) = socket_index(pin) {
+                            // a socket was connected
+                            *socket = Some(pin);
+                            *socket_i = Some(i);
+                        } else if let Some(i) = socket_i {
+                            // if we already have a socket connected
+                            let socket = socket.unwrap_or(MyPin::UnknownPin);
+                            match *gmode {
+                                GameMode::MapQuiz1 | GameMode::MapQuiz2 => {
+                                    if pin == answers[*i].unwrap_or(MyPin::UnknownPin) {
+                                        set_output::spawn(pin).ok();
+                                        clear_output::spawn(socket).ok();
+                                        answers[*i] = None;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                };
+            });
         }
     }
 
-    #[task(priority = 1, capacity = 8, shared = [ioe0, output, rise, gmode, irqc, uart])]
+    #[task(priority = 1, capacity = 8, shared = [ioe0, output, rise, gmode, socket, socket_i, answers, irqc, uart])]
     fn input_event_rise(cx: input_event_rise::Context) {
         let input_event_rise::SharedResources {
             ioe0,
             output,
             rise,
             gmode,
+            socket,
+            socket_i,
+            answers,
             irqc,
             uart,
             ..
@@ -599,33 +633,44 @@ mod app {
                 });
             }
 
-            if let MyPin::Mode01 = pin {
-                let lamps = (gmode,).lock(|gmode| {
-                    // Has the MODE switch been pressed?
+            // socket was disconnected?
+            if socket_index(pin).is_some() {
+                (socket, socket_i).lock(|socket, socket_i| {
+                    *socket = None;
+                    *socket_i = None;
+                });
+            }
 
+            if let MyPin::Mode01 = pin {
+                let lamps = (gmode, answers).lock(|gmode, answers| {
+                    // Has the MODE switch been pressed?
                     match *gmode {
                         GameMode::None => {
                             *gmode = GameMode::MapQuiz1;
-                            &OUT_TEST_SOCKET
+                            *answers = ANSWERS_MAP_A;
+                            sockets_on::spawn_after(1000u64.millis()).ok();
+                            &OUT_MAP_S
                         }
                         GameMode::MapQuiz1 => {
                             *gmode = GameMode::MapQuiz2;
-                            &OUT_TEST_MAP_S
+                            *answers = ANSWERS_MAP_B;
+                            sockets_on::spawn_after(1000u64.millis()).ok();
+                            &OUT_MAP_N
                         }
                         GameMode::MapQuiz2 => {
                             *gmode = GameMode::Quiz;
-                            &OUT_TEST_MAP_N
+                            &OUT_SOCKET
                         }
                         GameMode::Quiz => {
                             *gmode = GameMode::None;
-                            &OUT_TEST_QUIZ
+                            &OUT_QUIZ
                         }
                     }
                 });
 
                 (ioe0, output).lock(|ioe0, output| {
                     (0..24).for_each(|i| {
-                        let pin_bits = lamps[i].clone() as u32;
+                        let pin_bits = lamps[i] as u32;
                         let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                         let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
                         output[chip] = out;
@@ -656,26 +701,26 @@ mod app {
                 let (test, active) = match *tstate {
                     OutTestState::TestQuiz => {
                         *tstate = OutTestState::TestMapS;
-                        (&OUT_TEST_QUIZ, true)
+                        (&OUT_QUIZ, true)
                     }
                     OutTestState::TestMapS => {
                         *tstate = OutTestState::TestMapN;
-                        (&OUT_TEST_MAP_S, true)
+                        (&OUT_MAP_S, true)
                     }
                     OutTestState::TestMapN => {
                         *tstate = OutTestState::TestSocket;
-                        (&OUT_TEST_MAP_N, true)
+                        (&OUT_MAP_N, true)
                     }
                     OutTestState::TestSocket => {
                         *tstate = OutTestState::Idle;
-                        (&OUT_TEST_SOCKET, true)
+                        (&OUT_SOCKET, true)
                     }
-                    OutTestState::Idle => (&OUT_TEST_SOCKET, false),
+                    OutTestState::Idle => (&OUT_SOCKET, false),
                 };
 
                 if active {
                     (0..24).for_each(|i| {
-                        let pin_bits = test[i].clone() as u32;
+                        let pin_bits = test[i] as u32;
                         let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                         let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
                         output[chip] = out;
@@ -704,7 +749,7 @@ mod app {
                 MyPin::UnknownPin => {}
                 p => {
                     // Blink the lamp for 0.5 seconds
-                    set_output::spawn(p.clone()).ok();
+                    set_output::spawn(p).ok();
                     clear_output::spawn_after(500u64.millis(), p).ok();
                 }
             }
@@ -723,34 +768,34 @@ mod app {
         } = cx.shared;
 
         let (test, test_active) = match pin {
-            MyPin::Quiz01 => (&OUT_TEST_QUIZ, true),
-            MyPin::Quiz02 => (&OUT_TEST_MAP_S, true),
-            MyPin::Quiz03 => (&OUT_TEST_MAP_N, true),
-            MyPin::Quiz04 => (&OUT_TEST_SOCKET, true),
+            MyPin::Quiz01 => (&OUT_QUIZ, true),
+            MyPin::Quiz02 => (&OUT_MAP_S, true),
+            MyPin::Quiz03 => (&OUT_MAP_N, true),
+            MyPin::Quiz04 => (&OUT_SOCKET, true),
             MyPin::Quiz05 => {
                 out_zero::spawn().ok();
-                (&OUT_TEST_QUIZ, false)
+                (&OUT_QUIZ, false)
             }
             MyPin::Quiz23 => {
                 (rand,).lock(|rand| {
                     *rand = true;
                     rand_output::spawn().ok();
                 });
-                (&OUT_TEST_QUIZ, false)
+                (&OUT_QUIZ, false)
             }
             MyPin::Quiz24 => {
                 (rand,).lock(|rand| {
                     *rand = false;
                 });
-                (&OUT_TEST_QUIZ, false)
+                (&OUT_QUIZ, false)
             }
-            _ => (&OUT_TEST_QUIZ, false),
+            _ => (&OUT_QUIZ, false),
         };
 
         if test_active {
             (output, ioe0).lock(|output, ioe0| {
                 (0..24).for_each(|i| {
-                    let pin_bits = test[i].clone() as u32;
+                    let pin_bits = test[i] as u32;
                     let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                     let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
                     output[chip] = out;
@@ -764,7 +809,7 @@ mod app {
     fn set_output(cx: set_output::Context, pin: MyPin) {
         let set_output::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
-            let pin_bits = pin.clone() as u32;
+            let pin_bits = pin as u32;
             let chip = ((pin_bits & 0xFF00) >> 8) as usize;
             let out = output[chip] | (1u16 << ((pin_bits & 0xFF) as u8));
             output[chip] = out;
@@ -776,7 +821,7 @@ mod app {
     fn toggle_output(cx: toggle_output::Context, pin: MyPin) {
         let toggle_output::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
-            let pin_bits = pin.clone() as u32;
+            let pin_bits = pin as u32;
             let chip = ((pin_bits & 0xFF00) >> 8) as usize;
             let out = output[chip] ^ (1u16 << ((pin_bits & 0xFF) as u8));
             output[chip] = out;
@@ -788,7 +833,7 @@ mod app {
     fn clear_output(cx: clear_output::Context, pin: MyPin) {
         let clear_output::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
-            let pin_bits = pin.clone() as u32;
+            let pin_bits = pin as u32;
             let chip = ((pin_bits & 0xFF00) >> 8) as usize;
             let out = output[chip] & (!(1u16 << ((pin_bits & 0xFF) as u8)));
             output[chip] = out;
@@ -814,6 +859,20 @@ mod app {
             (0..=7).for_each(|i| {
                 ioe0.0.lock(|drv| drv.write_u16(i, 0xFFFF).ok());
                 output[i as usize] = 0xFFFF;
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn sockets_on(cx: sockets_on::Context) {
+        let sockets_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_SOCKET[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
             });
         });
     }
