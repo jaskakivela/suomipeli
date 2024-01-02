@@ -557,27 +557,33 @@ mod app {
                         // ignore these
                     }
                     _ => {
-                        // Make audible feedback
-                        set_output::spawn(MyPin::Relay01).ok();
-                        clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
-
                         /*
+                        // useful when debugging
                         set_output::spawn(pin.clone()).ok();
                         clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
                         */
+
+                        // Make audible feedback
+                        click_relay01::spawn().ok();
 
                         if let Some(i) = socket_index(pin) {
                             // a socket was connected
                             *socket = Some(pin);
                             *socket_i = Some(i);
+
+                            // blink the light shortly
+                            set_output::spawn(pin).ok();
+                            clear_output::spawn_after(500u64.millis(), pin).ok();
                         } else if let Some(i) = socket_i {
                             // if we already have a socket connected
                             let socket = socket.unwrap_or(MyPin::UnknownPin);
                             match *gmode {
-                                GameMode::MapQuiz1 | GameMode::MapQuiz2 => {
+                                GameMode::MapQuiz1 | GameMode::MapQuiz2 | GameMode::Quiz => {
                                     if pin == answers[*i].unwrap_or(MyPin::UnknownPin) {
-                                        set_output::spawn(pin).ok();
-                                        clear_output::spawn(socket).ok();
+                                        // we got the right answer!
+                                        ting_bell01::spawn().ok();
+                                        clear_output::spawn(pin).ok();
+                                        set_output::spawn(socket).ok();
                                         answers[*i] = None;
                                     }
                                 }
@@ -590,11 +596,9 @@ mod app {
         }
     }
 
-    #[task(priority = 1, capacity = 8, shared = [ioe0, output, rise, gmode, socket, socket_i, answers, irqc, uart])]
+    #[task(priority = 1, capacity = 8, shared = [rise, gmode, socket, socket_i, answers, irqc, uart])]
     fn input_event_rise(cx: input_event_rise::Context) {
         let input_event_rise::SharedResources {
-            ioe0,
-            output,
             rise,
             gmode,
             socket,
@@ -642,46 +646,30 @@ mod app {
             }
 
             if let MyPin::Mode01 = pin {
-                let lamps = (gmode, answers).lock(|gmode, answers| {
+                (gmode, answers).lock(|gmode, answers| {
                     // Has the MODE switch been pressed?
+                    // We have a state machine for mode change.
                     match *gmode {
-                        GameMode::None => {
+                        GameMode::None | GameMode::Quiz => {
                             *gmode = GameMode::MapQuiz1;
                             *answers = ANSWERS_MAP_A;
-                            sockets_on::spawn_after(1000u64.millis()).ok();
-                            &OUT_MAP_S
+                            out_zero::spawn().ok();
+                            gamemode_map1::spawn_after(500u64.millis()).ok();
                         }
                         GameMode::MapQuiz1 => {
                             *gmode = GameMode::MapQuiz2;
                             *answers = ANSWERS_MAP_B;
-                            sockets_on::spawn_after(1000u64.millis()).ok();
-                            &OUT_MAP_N
+                            out_zero::spawn().ok();
+                            gamemode_map2::spawn_after(500u64.millis()).ok();
                         }
                         GameMode::MapQuiz2 => {
                             *gmode = GameMode::Quiz;
-                            &OUT_SOCKET
-                        }
-                        GameMode::Quiz => {
-                            *gmode = GameMode::None;
-                            &OUT_QUIZ
+                            *answers = ANSWERS_QUIZ;
+                            out_zero::spawn().ok();
+                            gamemode_quiz::spawn_after(500u64.millis()).ok();
                         }
                     }
                 });
-
-                (ioe0, output).lock(|ioe0, output| {
-                    (0..24).for_each(|i| {
-                        let pin_bits = lamps[i] as u32;
-                        let chip = ((pin_bits & 0xFF00) >> 8) as usize;
-                        let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
-                        output[chip] = out;
-                        ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
-                    });
-                });
-                out_zero::spawn_after(900u64.millis()).ok();
-
-                // Make audible feedback
-                set_output::spawn(MyPin::Bell01).ok();
-                clear_output::spawn_after(100u64.millis(), MyPin::Bell01).ok();
             }
         }
     }
@@ -719,6 +707,7 @@ mod app {
                 };
 
                 if active {
+                    click_relay01::spawn().ok();
                     (0..24).for_each(|i| {
                         let pin_bits = test[i] as u32;
                         let chip = ((pin_bits & 0xFF00) >> 8) as usize;
@@ -728,6 +717,8 @@ mod app {
                     });
                     out_zero::spawn_after(900u64.millis()).ok();
                     test_output::spawn_after(1000u64.millis()).ok();
+                } else {
+                    ting_bell01::spawn().ok();
                 }
             });
         }
@@ -863,6 +854,18 @@ mod app {
         });
     }
 
+    #[task(priority = 1, capacity = 4)]
+    fn click_relay01(_cx: click_relay01::Context) {
+        set_output::spawn(MyPin::Relay01).ok();
+        clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn ting_bell01(_cx: ting_bell01::Context) {
+        set_output::spawn(MyPin::Bell01).ok();
+        clear_output::spawn_after(100u64.millis(), MyPin::Bell01).ok();
+    }
+
     #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
     fn sockets_on(cx: sockets_on::Context) {
         let sockets_on::SharedResources { ioe0, output, .. } = cx.shared;
@@ -875,6 +878,155 @@ mod app {
                 ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
             });
         });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn sockets_off(cx: sockets_off::Context) {
+        let sockets_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_SOCKET[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn quiz_on(cx: quiz_on::Context) {
+        let quiz_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_QUIZ[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn quiz_off(cx: quiz_off::Context) {
+        let quiz_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_QUIZ[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_s_on(cx: map_s_on::Context) {
+        let map_s_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_S[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_s_off(cx: map_s_off::Context) {
+        let map_s_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_S[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_n_on(cx: map_n_on::Context) {
+        let map_n_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_N[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_n_off(cx: map_n_off::Context) {
+        let map_n_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_N[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn map_all_on(_cx: map_all_on::Context) {
+        map_s_on::spawn().ok();
+        map_n_on::spawn().ok();
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn map_all_off(_cx: map_all_off::Context) {
+        map_s_off::spawn().ok();
+        map_n_off::spawn().ok();
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn gamemode_map1(_cx: gamemode_map1::Context) {
+        map_s_on::spawn().ok();
+        click_relay01::spawn().ok();
+        map_s_off::spawn_after(500u64.millis()).ok();
+
+        map_s_on::spawn_after(1000u64.millis()).ok();
+        click_relay01::spawn_after(1000u64.millis()).ok();
+        map_s_off::spawn_after(1500u64.millis()).ok();
+
+        map_all_on::spawn_after(2000u64.millis()).ok();
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn gamemode_map2(_cx: gamemode_map2::Context) {
+        map_n_on::spawn().ok();
+        click_relay01::spawn().ok();
+        map_n_off::spawn_after(500u64.millis()).ok();
+
+        map_n_on::spawn_after(1000u64.millis()).ok();
+        click_relay01::spawn_after(1000u64.millis()).ok();
+        map_n_off::spawn_after(1500u64.millis()).ok();
+
+        map_all_on::spawn_after(2000u64.millis()).ok();
+    }
+
+    #[task(priority = 1, capacity = 4)]
+    fn gamemode_quiz(_cx: gamemode_quiz::Context) {
+        quiz_on::spawn().ok();
+        click_relay01::spawn().ok();
+        quiz_off::spawn_after(500u64.millis()).ok();
+
+        quiz_on::spawn_after(1000u64.millis()).ok();
+        click_relay01::spawn_after(1000u64.millis()).ok();
+        quiz_off::spawn_after(1500u64.millis()).ok();
+
+        quiz_on::spawn_after(2000u64.millis()).ok();
     }
 }
 

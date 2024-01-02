@@ -1,13 +1,16 @@
 // mypin.rs
 
-// We have 8*16 input pins and 8*16 output pins on separate i2c buses.
+// We have 8*16 input pins and 8*16 output pins on two separate i2c buses.
 
 // NOTE: we use hex encoding in enum values:
 // 0x0008_050c means
-// 00 = input chip address (00-07)
-// 12 = input pin# (00-0f)
-// 05 = output chip address (00-07)
-// 0c = output pin# (00-0f)
+// 00 = input chip address
+// 08 = input pin#
+// 05 = output chip address
+// 0c = output pin#
+//
+// chip address range is 00..07 inclusive
+// pin# range is 00..0f inclusive
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,6 +291,33 @@ pub const ANSWERS_MAP_B: [Option<MyPin>; 24] = [
     Some(MyPin::Map36_Pudasjärvi),
     Some(MyPin::Map10_Pori),
     Some(MyPin::Map01_Tammisaari),
+];
+
+pub const ANSWERS_QUIZ: [Option<MyPin>; 24] = [
+    Some(MyPin::Quiz14), // * Neuvostoliitto
+    Some(MyPin::Quiz11), // * Japani
+    Some(MyPin::Quiz08), // * Turkki
+    Some(MyPin::Quiz09), // * USA
+    Some(MyPin::Quiz19), // * Suomi
+    Some(MyPin::Quiz22), // * Ranska
+    Some(MyPin::Quiz01), // * Belgia
+    Some(MyPin::Quiz24), // * Sveitsi
+    Some(MyPin::Quiz15), // * DDR
+    Some(MyPin::Quiz03), // * Länsi-Saksa
+    Some(MyPin::Quiz20), // * Ruåtsi
+    Some(MyPin::Quiz17), // * Islanti
+    Some(MyPin::Quiz07), // * Englanti
+    Some(MyPin::Quiz18), // * Norja
+    Some(MyPin::Quiz13), // * Tsekkoslovakia
+    Some(MyPin::Quiz02), // * Uganda
+    Some(MyPin::Quiz23), // * Kreikka
+    Some(MyPin::Quiz21), // * Kiina
+    Some(MyPin::Quiz06), // * Romania
+    Some(MyPin::Quiz10), // * Kanada
+    Some(MyPin::Quiz12), // * Intia
+    Some(MyPin::Quiz04), // * Unkari
+    Some(MyPin::Quiz16), // * Tanska
+    Some(MyPin::Quiz05), // * Espanja
 ];
 
 pub fn socket_index(pin: MyPin) -> Option<usize> {

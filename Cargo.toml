@@ -3,7 +3,7 @@ authors = ["sjm"]
 edition = "2021"
 readme = "README.md"
 name = "suomipeli"
-version = "0.2.0"
+version = "0.2.2"
 resolver = "2"
 
 
@@ -23,14 +23,10 @@ cortex-m-rtic = "1.1"
 embedded-hal = { version = "0.2", features = ["unproven"] }
 embedded-time = "0.12"
 fugit = "0.3"
-# futures = { version = "0.3", default-features = false, optional = true }
 panic-halt = "0.2"
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 rp-pico = "0.8"
 rp2040-boot2 = { version = "0.3" }
-# rp2040-hal = { version = "0.7", features = ["rt", "eh1_0_alpha "] }
-# rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", features = ["rt","eh1_0_alpha "] }
-# rp2040-hal = { path = "../../00test/rp-hal", features = ["rt", "eh1_0_alpha "] }
 systick-monotonic = "1.0"
 
 shared-bus = { version = "0.3", features = ["cortex-m"] }
