@@ -126,7 +126,7 @@ pub enum MyPin {
 
     Relay01 = 0xffff_0300, // output only
     Bell01 = 0xffff_0301,  // output only
-    Mode01 = 0x070f_ffff,  // intput only
+    Mode01 = 0x070f_ffff,  // input only
 
     UnknownPin = 0xffff_ffff,
 }
@@ -210,6 +210,60 @@ pub const OUT_MAP_N: [MyPin; 24] = [
     MyPin::Map46_Inari,
     MyPin::Map47_Utsjoki,
     MyPin::Map48_Kilpisjärvi,
+];
+
+pub const OUT_MAP_A: [MyPin; 24] = [
+    MyPin::Map22_Ähtäri,
+    MyPin::Map42_Salla,
+    MyPin::Map13_Savonlinna,
+    MyPin::Map26_Kokkola,
+    MyPin::Map46_Inari,
+    MyPin::Map17_Isojoki,
+    MyPin::Map38_Aavasaksa,
+    MyPin::Map03_Porvoo,
+    MyPin::Map35_Suomussalmi,
+    MyPin::Map27_Nivala,
+    MyPin::Map39_Kuusamo,
+    MyPin::Map37_Kemi,
+    MyPin::Map40_Rovaniemi,
+    MyPin::Map47_Utsjoki,
+    MyPin::Map33_Raahe,
+    MyPin::Map14_Varkaus,
+    MyPin::Map06_Lahti,
+    MyPin::Map43_Sodankylä,
+    MyPin::Map15_Jyväskylä,
+    MyPin::Map05_Turku,
+    MyPin::Map11_Tampere,
+    MyPin::Map34_Oulu,
+    MyPin::Map29_Nurmes,
+    MyPin::Map18_Joensuu,
+];
+
+pub const OUT_MAP_B: [MyPin; 24] = [
+    MyPin::Map23_Seinäjoki,
+    MyPin::Map41_Kemijärvi,
+    MyPin::Map12_Mikkeli,
+    MyPin::Map19_Ilomantsi,
+    MyPin::Map07_Hämeenlinna,
+    MyPin::Map45_Korvatunturi,
+    MyPin::Map24_Vaasa,
+    MyPin::Map09_Rauma,
+    MyPin::Map25_Kaustinen,
+    MyPin::Map32_Kajaani,
+    MyPin::Map08_Lappeenranta,
+    MyPin::Map02_Helsinki,
+    MyPin::Map20_Kuopio,
+    MyPin::Map48_Kilpisjärvi,
+    MyPin::Map31_Kuhmo,
+    MyPin::Map28_Iisalmi,
+    MyPin::Map04_Kotka,
+    MyPin::Map16_Vilppula,
+    MyPin::Map44_Muonio,
+    MyPin::Map30_Lieksa,
+    MyPin::Map21_Viitasaari,
+    MyPin::Map36_Pudasjärvi,
+    MyPin::Map10_Pori,
+    MyPin::Map01_Tammisaari,
 ];
 
 pub const OUT_SOCKET: [MyPin; 24] = [
