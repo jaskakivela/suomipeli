@@ -55,8 +55,8 @@ type MyUart = uart::UartPeripheral<
 pub enum OutTestState {
     Idle,
     TestQuiz,
-    TestMapS,
-    TestMapN,
+    TestMapA,
+    TestMapB,
     TestSocket,
 }
 
@@ -572,8 +572,8 @@ mod app {
                             *socket_i = Some(i);
 
                             // blink the light shortly
-                            set_output::spawn(pin).ok();
-                            clear_output::spawn_after(500u64.millis(), pin).ok();
+                            clear_output::spawn(pin).ok();
+                            set_output::spawn_after(500u64.millis(), pin).ok();
                         } else if let Some(i) = socket_i {
                             // if we already have a socket connected
                             let socket = socket.unwrap_or(MyPin::UnknownPin);
@@ -583,7 +583,7 @@ mod app {
                                         // we got the right answer!
                                         ting_bell01::spawn().ok();
                                         clear_output::spawn(pin).ok();
-                                        set_output::spawn(socket).ok();
+                                        clear_output::spawn(socket).ok();
                                         answers[*i] = None;
                                     }
                                 }
@@ -688,16 +688,16 @@ mod app {
             (ioe0, output, tstate).lock(|ioe0, output, tstate| {
                 let (test, active) = match *tstate {
                     OutTestState::TestQuiz => {
-                        *tstate = OutTestState::TestMapS;
+                        *tstate = OutTestState::TestMapA;
                         (&OUT_QUIZ, true)
                     }
-                    OutTestState::TestMapS => {
-                        *tstate = OutTestState::TestMapN;
-                        (&OUT_MAP_S, true)
+                    OutTestState::TestMapA => {
+                        *tstate = OutTestState::TestMapB;
+                        (&OUT_MAP_A, true)
                     }
-                    OutTestState::TestMapN => {
+                    OutTestState::TestMapB => {
                         *tstate = OutTestState::TestSocket;
-                        (&OUT_MAP_N, true)
+                        (&OUT_MAP_B, true)
                     }
                     OutTestState::TestSocket => {
                         *tstate = OutTestState::Idle;
@@ -760,8 +760,8 @@ mod app {
 
         let (test, test_active) = match pin {
             MyPin::Quiz01 => (&OUT_QUIZ, true),
-            MyPin::Quiz02 => (&OUT_MAP_S, true),
-            MyPin::Quiz03 => (&OUT_MAP_N, true),
+            MyPin::Quiz02 => (&OUT_MAP_A, true),
+            MyPin::Quiz03 => (&OUT_MAP_B, true),
             MyPin::Quiz04 => (&OUT_SOCKET, true),
             MyPin::Quiz05 => {
                 out_zero::spawn().ok();
@@ -923,6 +923,62 @@ mod app {
     }
 
     #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_a_on(cx: map_a_on::Context) {
+        let map_a_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_A[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_a_off(cx: map_a_off::Context) {
+        let map_a_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_A[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_b_on(cx: map_b_on::Context) {
+        let map_b_on::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_B[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
+    fn map_b_off(cx: map_b_off::Context) {
+        let map_b_off::SharedResources { ioe0, output, .. } = cx.shared;
+        (ioe0, output).lock(|ioe0, output| {
+            (0..24).for_each(|i| {
+                let pin_bits = OUT_MAP_B[i] as u32;
+                let chip = ((pin_bits & 0xFF00) >> 8) as usize;
+                let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
+                output[chip] = out;
+                ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
+            });
+        });
+    }
+
+    #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
     fn map_s_on(cx: map_s_on::Context) {
         let map_s_on::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
@@ -992,28 +1048,30 @@ mod app {
 
     #[task(priority = 1, capacity = 4)]
     fn gamemode_map1(_cx: gamemode_map1::Context) {
-        map_s_on::spawn().ok();
+        map_a_on::spawn().ok();
         click_relay01::spawn().ok();
-        map_s_off::spawn_after(500u64.millis()).ok();
+        map_a_off::spawn_after(500u64.millis()).ok();
 
         map_s_on::spawn_after(1000u64.millis()).ok();
         click_relay01::spawn_after(1000u64.millis()).ok();
         map_s_off::spawn_after(1500u64.millis()).ok();
 
         map_all_on::spawn_after(2000u64.millis()).ok();
+        sockets_on::spawn_after(2000u64.millis()).ok();
     }
 
     #[task(priority = 1, capacity = 4)]
     fn gamemode_map2(_cx: gamemode_map2::Context) {
-        map_n_on::spawn().ok();
+        map_b_on::spawn().ok();
         click_relay01::spawn().ok();
-        map_n_off::spawn_after(500u64.millis()).ok();
+        map_b_off::spawn_after(500u64.millis()).ok();
 
         map_n_on::spawn_after(1000u64.millis()).ok();
         click_relay01::spawn_after(1000u64.millis()).ok();
         map_n_off::spawn_after(1500u64.millis()).ok();
 
         map_all_on::spawn_after(2000u64.millis()).ok();
+        sockets_on::spawn_after(2000u64.millis()).ok();
     }
 
     #[task(priority = 1, capacity = 4)]
@@ -1027,6 +1085,7 @@ mod app {
         quiz_off::spawn_after(1500u64.millis()).ok();
 
         quiz_on::spawn_after(2000u64.millis()).ok();
+        sockets_on::spawn_after(2000u64.millis()).ok();
     }
 }
 
