@@ -533,180 +533,185 @@ mod app {
         });
 
         // Have any contacts been touched?
-        if edge_low {
-            let pin = pin_input_ident(chip, bit);
+        if !edge_low {
+            return;
+        }
+        let pin = pin_input_ident(chip, bit);
 
-            #[cfg(feature = "input_debug")]
-            {
-                let mut buf = [0u8; 80];
-                let mut w = Wrapper::new(&mut buf);
+        #[cfg(feature = "input_debug")]
+        {
+            let mut buf = [0u8; 80];
+            let mut w = Wrapper::new(&mut buf);
 
-                (irqc,).lock(|irqc| {
-                    write!(w, "Falling edge: c{chip} b{bit} c{} {pin:?}\r\n\r\n", *irqc).ok();
-                });
-                (uart,).lock(|uart| {
-                    uart.write_full_blocking(&buf);
-                });
-            }
-
-            (estate,).lock(|estate| match *estate {
-                EasterEggState::Start => {
-                    if let MyPin::Map05_Turku = pin {
-                        *estate = EasterEggState::Phase1;
-                    }
-                }
-                EasterEggState::Phase1 => {
-                    if let MyPin::Map01_Tammisaari = pin {
-                        *estate = EasterEggState::Phase2;
-                    } else {
-                        *estate = EasterEggState::Start;
-                    }
-                }
-                EasterEggState::Phase2 => {
-                    if let MyPin::Map05_Turku = pin {
-                        *estate = EasterEggState::Phase3;
-                    } else {
-                        *estate = EasterEggState::Start;
-                    }
-                }
-                EasterEggState::Phase3 => {
-                    if let MyPin::Map01_Tammisaari = pin {
-                        *estate = EasterEggState::Go;
-                    } else {
-                        *estate = EasterEggState::Start;
-                    }
-                }
-                EasterEggState::Go => {
-                    out_zero::spawn().ok();
-                    easter_egg::spawn(pin).ok();
-                }
+            (irqc,).lock(|irqc| {
+                write!(w, "Falling edge: c{chip} b{bit} c{} {pin:?}\r\n\r\n", *irqc).ok();
             });
+            (uart,).lock(|uart| {
+                uart.write_full_blocking(&buf);
+            });
+        }
 
-            (
-                gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b,
-            )
-                .lock(
-                    |gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b| {
-                        match pin {
-                            MyPin::Mode01 | MyPin::UnknownPin => {
-                                // ignore these (Mode01 is handled at rising edge)
-                            }
-                            _ => {
-                                /*
-                                // useful when debugging
-                                set_output::spawn(pin.clone()).ok();
-                                clear_output::spawn_after((3*LONG_TIME).millis(), pin.clone()).ok();
-                                */
+        let mut egg: bool = false;
+        (estate,).lock(|estate| match *estate {
+            EasterEggState::Start => {
+                if let MyPin::Map05_Turku = pin {
+                    *estate = EasterEggState::Phase1;
+                }
+            }
+            EasterEggState::Phase1 => {
+                if let MyPin::Map01_Tammisaari = pin {
+                    *estate = EasterEggState::Phase2;
+                } else {
+                    *estate = EasterEggState::Start;
+                }
+            }
+            EasterEggState::Phase2 => {
+                if let MyPin::Map05_Turku = pin {
+                    *estate = EasterEggState::Phase3;
+                } else {
+                    *estate = EasterEggState::Start;
+                }
+            }
+            EasterEggState::Phase3 => {
+                if let MyPin::Map01_Tammisaari = pin {
+                    *estate = EasterEggState::Go;
+                } else {
+                    *estate = EasterEggState::Start;
+                }
+            }
+            EasterEggState::Go => {
+                out_zero::spawn().ok();
+                easter_egg::spawn(pin).ok();
+                egg = true;
+            }
+        });
 
-                                // Make audible feedback
-                                click_relay01::spawn().ok();
+        if egg {
+            return;
+        };
 
-                                if let Some(i) = socket_index(pin) {
-                                    // a socket was connected
-                                    *socket = Some(pin);
-                                    *socket_i = Some(i);
+        (
+            gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b,
+        )
+            .lock(
+                |gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b| {
+                    match pin {
+                        MyPin::Mode01 | MyPin::UnknownPin => {
+                            // ignore these (Mode01 is handled at rising edge)
+                        }
+                        _ => {
+                            /*
+                            // useful when debugging
+                            set_output::spawn(pin.clone()).ok();
+                            clear_output::spawn_after((3*LONG_TIME).millis(), pin.clone()).ok();
+                            */
 
-                                    // blink the light shortly
-                                    toggle_output::spawn(pin).ok();
-                                    toggle_output::spawn_after(SHORT_TIME.millis(), pin).ok();
-                                } else if let Some(i) = socket_i {
-                                    // if we already have a socket connected
-                                    let socket = socket.unwrap_or(MyPin::UnknownPin);
+                            // Make audible feedback
+                            click_relay01::spawn().ok();
 
-                                    if !*game_on {
-                                        // Difficulty level selection only available before starting the game
-                                        match *gmode {
-                                            GameMode::MapQuizA | GameMode::MapQuizB => {
-                                                if pin == MyPin::Quiz03 {
-                                                    match *gdiff {
-                                                        GameDifficulty::Novice => {
-                                                            *gdiff = GameDifficulty::Expert;
-                                                            set_output::spawn(MyPin::Quiz03).ok();
-                                                        }
-                                                        GameDifficulty::Expert => {
-                                                            *gdiff = GameDifficulty::Novice;
-                                                            clear_output::spawn(MyPin::Quiz03).ok();
-                                                        }
-                                                    }
-                                                    return;
-                                                }
-                                            }
-                                            GameMode::Quiz => {
-                                                if pin == MyPin::Map47_Utsjoki {
-                                                    match *gdiff {
-                                                        GameDifficulty::Novice => {
-                                                            *gdiff = GameDifficulty::Expert;
-                                                            set_output::spawn(MyPin::Map47_Utsjoki)
-                                                                .ok();
-                                                        }
-                                                        GameDifficulty::Expert => {
-                                                            *gdiff = GameDifficulty::Novice;
-                                                            clear_output::spawn(
-                                                                MyPin::Map47_Utsjoki,
-                                                            )
-                                                            .ok();
-                                                        }
-                                                    }
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
+                            if let Some(i) = socket_index(pin) {
+                                // a socket was connected
+                                *socket = Some(pin);
+                                *socket_i = Some(i);
 
-                                    *game_on = true;
+                                // blink the light shortly
+                                toggle_output::spawn(pin).ok();
+                                toggle_output::spawn_after(SHORT_TIME.millis(), pin).ok();
+                            } else if let Some(i) = socket_i {
+                                // if we already have a socket connected
+                                let socket = socket.unwrap_or(MyPin::UnknownPin);
+
+                                if !*game_on {
+                                    // Difficulty level selection only available before starting the game
                                     match *gmode {
+                                        GameMode::MapQuizA | GameMode::MapQuizB => {
+                                            if pin == MyPin::Quiz03 {
+                                                match *gdiff {
+                                                    GameDifficulty::Novice => {
+                                                        *gdiff = GameDifficulty::Expert;
+                                                        set_output::spawn(MyPin::Quiz03).ok();
+                                                    }
+                                                    GameDifficulty::Expert => {
+                                                        *gdiff = GameDifficulty::Novice;
+                                                        clear_output::spawn(MyPin::Quiz03).ok();
+                                                    }
+                                                }
+                                                return;
+                                            }
+                                        }
                                         GameMode::Quiz => {
-                                            if pin == answers_a[*i].unwrap_or(MyPin::UnknownPin) {
-                                                // we got the right answer!
-                                                ting_bell01::spawn().ok();
-                                                clear_output::spawn(pin).ok();
-                                                clear_output::spawn(socket).ok();
-                                                answers_a[*i] = None;
-                                            } else if *gdiff == GameDifficulty::Expert {
-                                                // no mistakes allowed in expert mode
-                                                click_relay01::spawn().ok();
-                                                gamemode_quiz::spawn().ok();
-                                            }
-                                        }
-                                        GameMode::MapQuizA => {
-                                            if pin == answers_a[*i].unwrap_or(MyPin::UnknownPin) {
-                                                // we got the right answer!
-                                                ting_bell01::spawn().ok();
-                                                clear_output::spawn(pin).ok();
-                                                clear_output::spawn(socket).ok();
-                                                answers_a[*i] = None;
-                                            } else if pin == MyPin::Quiz02 {
-                                                // Switch to Map B
-                                                gamemode_mapB::spawn().ok();
-                                            } else if *gdiff == GameDifficulty::Expert {
-                                                // no mistakes allowed in expert mode
-                                                click_relay01::spawn().ok();
-                                                gamemode_map::spawn().ok();
-                                            }
-                                        }
-                                        GameMode::MapQuizB => {
-                                            if pin == answers_b[*i].unwrap_or(MyPin::UnknownPin) {
-                                                // we got the right answer!
-                                                ting_bell01::spawn().ok();
-                                                clear_output::spawn(pin).ok();
-                                                clear_output::spawn(socket).ok();
-                                                answers_b[*i] = None;
-                                            } else if pin == MyPin::Quiz01 {
-                                                // Switch to Map A
-                                                gamemode_mapA::spawn().ok();
-                                            } else if *gdiff == GameDifficulty::Expert {
-                                                // no mistakes allowed in expert mode
-                                                click_relay01::spawn().ok();
-                                                gamemode_map::spawn().ok();
+                                            if pin == MyPin::Map47_Utsjoki {
+                                                match *gdiff {
+                                                    GameDifficulty::Novice => {
+                                                        *gdiff = GameDifficulty::Expert;
+                                                        set_output::spawn(MyPin::Map47_Utsjoki)
+                                                            .ok();
+                                                    }
+                                                    GameDifficulty::Expert => {
+                                                        *gdiff = GameDifficulty::Novice;
+                                                        clear_output::spawn(MyPin::Map47_Utsjoki)
+                                                            .ok();
+                                                    }
+                                                }
+                                                return;
                                             }
                                         }
                                     }
                                 }
+
+                                *game_on = true;
+                                match *gmode {
+                                    GameMode::Quiz => {
+                                        if pin == answers_a[*i].unwrap_or(MyPin::UnknownPin) {
+                                            // we got the right answer!
+                                            ting_bell01::spawn().ok();
+                                            clear_output::spawn(pin).ok();
+                                            clear_output::spawn(socket).ok();
+                                            answers_a[*i] = None;
+                                        } else if *gdiff == GameDifficulty::Expert {
+                                            // no mistakes allowed in expert mode
+                                            click_relay01::spawn().ok();
+                                            gamemode_quiz::spawn().ok();
+                                        }
+                                    }
+                                    GameMode::MapQuizA => {
+                                        if pin == answers_a[*i].unwrap_or(MyPin::UnknownPin) {
+                                            // we got the right answer!
+                                            ting_bell01::spawn().ok();
+                                            clear_output::spawn(pin).ok();
+                                            clear_output::spawn(socket).ok();
+                                            answers_a[*i] = None;
+                                        } else if pin == MyPin::Quiz02 {
+                                            // Switch to Map B
+                                            gamemode_mapB::spawn().ok();
+                                        } else if *gdiff == GameDifficulty::Expert {
+                                            // no mistakes allowed in expert mode
+                                            click_relay01::spawn().ok();
+                                            gamemode_map::spawn().ok();
+                                        }
+                                    }
+                                    GameMode::MapQuizB => {
+                                        if pin == answers_b[*i].unwrap_or(MyPin::UnknownPin) {
+                                            // we got the right answer!
+                                            ting_bell01::spawn().ok();
+                                            clear_output::spawn(pin).ok();
+                                            clear_output::spawn(socket).ok();
+                                            answers_b[*i] = None;
+                                        } else if pin == MyPin::Quiz01 {
+                                            // Switch to Map A
+                                            gamemode_mapA::spawn().ok();
+                                        } else if *gdiff == GameDifficulty::Expert {
+                                            // no mistakes allowed in expert mode
+                                            click_relay01::spawn().ok();
+                                            gamemode_map::spawn().ok();
+                                        }
+                                    }
+                                }
                             }
-                        };
-                    },
-                );
-        }
+                        }
+                    };
+                },
+            );
     }
 
     #[task(priority = 1, capacity = 8, shared = [rise, gmode, game_on, socket, socket_i, irqc, uart])]
@@ -874,10 +879,14 @@ mod app {
         });
     }
 
-    #[task(priority = 1, shared = [rand, ioe0, output])]
+    #[task(priority = 1, shared = [rand, ioe0, output, estate])]
     fn easter_egg(cx: easter_egg::Context, pin: MyPin) {
         let easter_egg::SharedResources {
-            rand, ioe0, output, ..
+            rand,
+            ioe0,
+            output,
+            estate,
+            ..
         } = cx.shared;
 
         let (test, test_active) = match pin {
@@ -897,8 +906,10 @@ mod app {
                 (&OUT_QUIZ, false)
             }
             MyPin::Quiz24 => {
-                (rand,).lock(|rand| {
+                (rand, estate).lock(|rand, estate| {
                     *rand = false;
+                    *estate = EasterEggState::Start;
+                    gamemode_map::spawn().ok();
                 });
                 (&OUT_QUIZ, false)
             }
@@ -1269,10 +1280,8 @@ mod app {
             for socket in &OUT_SOCKET {
                 let i = socket_index(*socket);
 
-                if i.is_some() {
-                    if answers_a[i.unwrap()].is_some() {
-                        set_output::spawn(*socket).ok();
-                    }
+                if i.is_some() && answers_a[i.unwrap()].is_some() {
+                    set_output::spawn(*socket).ok();
                 }
             }
             if let GameDifficulty::Expert = *gdiff {
@@ -1304,10 +1313,8 @@ mod app {
             for socket in &OUT_SOCKET {
                 let i = socket_index(*socket);
 
-                if i.is_some() {
-                    if answers_b[i.unwrap()].is_some() {
-                        set_output::spawn(*socket).ok();
-                    }
+                if i.is_some() && answers_b[i.unwrap()].is_some() {
+                    set_output::spawn(*socket).ok();
                 }
             }
             if let GameDifficulty::Expert = *gdiff {
