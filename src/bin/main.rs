@@ -637,7 +637,7 @@ mod app {
                                                 clear_output::spawn(socket).ok();
                                                 answers_b[*i] = None;
                                             } else if pin == MyPin::Quiz01 {
-                                                *gmode = GameMode::MapQuizB;
+                                                *gmode = GameMode::MapQuizA;
                                                 gamemode_mapA::spawn().ok();
                                             }
                                         }
@@ -1132,8 +1132,24 @@ mod app {
 
     // When starting a NEW Map game
     //
-    #[task(priority = 1, capacity = 4)]
-    fn gamemode_map(_cx: gamemode_map::Context) {
+    #[task(priority = 1, capacity = 4, shared = [answers_a, answers_b, gmode, game_on])]
+    fn gamemode_map(cx: gamemode_map::Context) {
+        let gamemode_map::SharedResources {
+            answers_a,
+            answers_b,
+            gmode,
+            game_on,
+        } = cx.shared;
+
+        (answers_a, answers_b, gmode, game_on).lock(|answers_a, answers_b, gmode, game_on| {
+            *gmode = GameMode::MapQuizA;
+            *game_on = false;
+            *answers_a = ANSWERS_MAP_A;
+            *answers_b = ANSWERS_MAP_B;
+        });
+
+        debug::spawn("Gamemode MAP starting\r\n".as_bytes()).ok();
+
         out_zero::spawn().ok();
         map_a_on::spawn().ok();
         click_relay01::spawn().ok();
@@ -1153,6 +1169,7 @@ mod app {
     fn gamemode_mapA(cx: gamemode_mapA::Context) {
         let gamemode_mapA::SharedResources { answers_a, .. } = cx.shared;
 
+        debug::spawn("Switching to map A\r\n".as_bytes()).ok();
         quiz_off::spawn().ok();
         sockets_off::spawn().ok();
         click_relay01::spawn_after(MEDIUM_TIME.millis()).ok();
@@ -1160,18 +1177,21 @@ mod app {
         set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz01).ok();
 
         (answers_a,).lock(|answers_a| {
-            for a in answers_a.iter() {
-                if !a.is_none() {
-                    let pin = a.unwrap();
+            (0..24).for_each(|i: usize| {
+                if !answers_a[i].is_none() {
+                    let pin = answers_a[i].unwrap();
                     set_output::spawn(pin).ok();
                 }
-            }
+            });
         });
     }
 
     #[task(priority = 1, capacity = 4, shared = [answers_b])]
     fn gamemode_mapB(cx: gamemode_mapB::Context) {
         let gamemode_mapB::SharedResources { answers_b, .. } = cx.shared;
+
+        debug::spawn("Switching to map B\r\n".as_bytes()).ok();
+
         quiz_off::spawn().ok();
         sockets_off::spawn().ok();
         click_relay01::spawn_after(MEDIUM_TIME.millis()).ok();
@@ -1179,12 +1199,12 @@ mod app {
         set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz02).ok();
 
         (answers_b,).lock(|answers_b| {
-            for b in answers_b.iter() {
-                if !b.is_none() {
-                    let pin = b.unwrap();
+            (0..24).for_each(|i: usize| {
+                if !answers_b[i].is_none() {
+                    let pin = answers_b[i].unwrap();
                     set_output::spawn(pin).ok();
                 }
-            }
+            });
         });
     }
 
@@ -1219,6 +1239,15 @@ mod app {
 
         quiz_on::spawn_after((2 * LONG_TIME).millis()).ok();
         sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
+    }
+
+    #[task(priority = 1, shared = [uart])]
+    fn debug(cx: debug::Context, buf: &'static [u8]) {
+        let debug::SharedResources { uart, .. } = cx.shared;
+
+        (uart,).lock(|uart| {
+            uart.write_full_blocking(buf);
+        });
     }
 }
 
