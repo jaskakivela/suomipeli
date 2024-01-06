@@ -111,6 +111,17 @@ mod app {
     #[monotonic(binds = SysTick, default = true)]
     type SystickMono = Systick<100>;
 
+    // time intervals for different blinkenlichten
+    //
+    pub const VERY_SHORT_TIME: u64 = 50u64;
+    pub const SHORT_TIME: u64 = 200u64;
+    pub const MEDIUM_TIME: u64 = 500u64;
+    pub const LONG_TIME: u64 = 1000u64;
+    pub const VERY_LONG_TIME: u64 = 7500u64;
+
+    pub const ALIVE_INTERVAL: u64 = 5000u64;
+    pub const LED_BLINK_INTERVAL: u64 = 420u64;
+
     #[local]
     struct Local {}
 
@@ -166,7 +177,7 @@ mod app {
             Wrapper::new(&mut buf),
             "\r\n\r\n*** Starting up Suomipeli\r\n\
             \x20   firmware v{}\r\n\r\n",
-            env!("CARGO_PKG_VERSION")
+            env!("CARGO_PKG_VERSION"),
         )
         .ok();
         uart.write_full_blocking(&buf);
@@ -230,13 +241,18 @@ mod app {
         let sw_pin = pins.gpio20.into_pull_up_input();
 
         #[cfg(feature = "test_output")]
-        test_output::spawn_after(1_000u64.millis()).ok();
+        test_output::spawn_after(MEDIUM_TIME.millis()).ok();
 
         #[cfg(feature = "io_irq")]
-        enable_io_irq::spawn_after(10_000u64.millis()).ok();
+        enable_io_irq::spawn_after(VERY_LONG_TIME.millis()).ok();
 
         #[cfg(feature = "io_noirq")]
-        io_noirq::spawn_after(10_000u64.millis()).ok();
+        io_noirq::spawn_after(VERY_LONG_TIME.millis()).ok();
+
+        // double-click the relay when we are ready for input
+        //
+        click_relay01::spawn_after(VERY_LONG_TIME.millis()).ok();
+        click_relay01::spawn_after((VERY_LONG_TIME + SHORT_TIME).millis()).ok();
 
         led_blink::spawn().ok();
         alive::spawn().ok();
@@ -307,7 +323,7 @@ mod app {
                 *led_on = true;
             }
         });
-        led_blink::spawn_after(1000u64.millis()).ok();
+        led_blink::spawn_after(LED_BLINK_INTERVAL.millis()).ok();
     }
 
     #[task(priority = 1, shared = [irqc, sw_pin, uart])]
@@ -321,7 +337,8 @@ mod app {
         (irqc, sw_pin).lock(|irqc, sw_pin| {
             write!(
                 Wrapper::new(&mut buf),
-                "irqc = {}, swpin = {}\r\n",
+                "{}: irqc = {}, swpin = {}\r\n",
+                monotonics::now().duration_since_epoch().to_secs(),
                 *irqc,
                 sw_pin.is_high().unwrap() as u8
             )
@@ -332,13 +349,13 @@ mod app {
             uart.write_full_blocking(&buf);
         });
 
-        alive::spawn_after(5000u64.millis()).ok();
+        alive::spawn_after(ALIVE_INTERVAL.millis()).ok();
     }
 
     #[task(priority = 2)]
     fn io_noirq(_cx: io_noirq::Context) {
         io_poll::spawn().ok();
-        io_noirq::spawn_after(100u64.millis()).ok();
+        io_noirq::spawn_after(VERY_SHORT_TIME.millis()).ok();
     }
 
     #[task(binds = IO_IRQ_BANK0, priority = 3, shared = [irqc, sw_pin])]
@@ -353,7 +370,7 @@ mod app {
         });
 
         // We are using 200ms debounce period
-        enable_io_irq::spawn_after(200u64.millis()).ok();
+        enable_io_irq::spawn_after(SHORT_TIME.millis()).ok();
 
         // Here we actually check what had changed in input pins
         io_poll::spawn().ok();
@@ -546,7 +563,7 @@ mod app {
                     }
                 }
                 EasterEggState::Go => {
-                    *estate = EasterEggState::Start;
+                    out_zero::spawn().ok();
                     easter_egg::spawn(pin).ok();
                 }
             });
@@ -554,13 +571,13 @@ mod app {
             (gmode, socket, socket_i, answers).lock(|gmode, socket, socket_i, answers| {
                 match pin {
                     MyPin::Mode01 | MyPin::UnknownPin => {
-                        // ignore these
+                        // ignore these (Mode01 is handled at rising edge)
                     }
                     _ => {
                         /*
                         // useful when debugging
                         set_output::spawn(pin.clone()).ok();
-                        clear_output::spawn_after(3000u64.millis(), pin.clone()).ok();
+                        clear_output::spawn_after((3*LONG_TIME).millis(), pin.clone()).ok();
                         */
 
                         // Make audible feedback
@@ -572,8 +589,8 @@ mod app {
                             *socket_i = Some(i);
 
                             // blink the light shortly
-                            clear_output::spawn(pin).ok();
-                            set_output::spawn_after(500u64.millis(), pin).ok();
+                            toggle_output::spawn(pin).ok();
+                            toggle_output::spawn_after(SHORT_TIME.millis(), pin).ok();
                         } else if let Some(i) = socket_i {
                             // if we already have a socket connected
                             let socket = socket.unwrap_or(MyPin::UnknownPin);
@@ -642,6 +659,10 @@ mod app {
                 (socket, socket_i).lock(|socket, socket_i| {
                     *socket = None;
                     *socket_i = None;
+
+                    // blink the light shortly
+                    toggle_output::spawn(pin).ok();
+                    toggle_output::spawn_after(SHORT_TIME.millis(), pin).ok();
                 });
             }
 
@@ -654,19 +675,19 @@ mod app {
                             *gmode = GameMode::MapQuiz1;
                             *answers = ANSWERS_MAP_A;
                             out_zero::spawn().ok();
-                            gamemode_map1::spawn_after(500u64.millis()).ok();
+                            gamemode_map1::spawn_after(MEDIUM_TIME.millis()).ok();
                         }
                         GameMode::MapQuiz1 => {
                             *gmode = GameMode::MapQuiz2;
                             *answers = ANSWERS_MAP_B;
                             out_zero::spawn().ok();
-                            gamemode_map2::spawn_after(500u64.millis()).ok();
+                            gamemode_map2::spawn_after(MEDIUM_TIME.millis()).ok();
                         }
                         GameMode::MapQuiz2 => {
                             *gmode = GameMode::Quiz;
                             *answers = ANSWERS_QUIZ;
                             out_zero::spawn().ok();
-                            gamemode_quiz::spawn_after(500u64.millis()).ok();
+                            gamemode_quiz::spawn_after(MEDIUM_TIME.millis()).ok();
                         }
                     }
                 });
@@ -715,8 +736,8 @@ mod app {
                         output[chip] = out;
                         ioe0.0.lock(|drv| drv.write_u16(chip as u8, out).ok());
                     });
-                    out_zero::spawn_after(900u64.millis()).ok();
-                    test_output::spawn_after(1000u64.millis()).ok();
+                    out_zero::spawn_after((LONG_TIME / 10 * 9).millis()).ok();
+                    test_output::spawn_after(LONG_TIME.millis()).ok();
                 } else {
                     ting_bell01::spawn().ok();
                 }
@@ -736,18 +757,20 @@ mod app {
             let mut r: [u8; 2] = [0; 2];
             rng.as_mut().unwrap().fill_bytes(&mut r);
             let rpin = pin_input_ident(r[0] & 0x07, r[1] & 0x0F);
+
             match rpin {
                 MyPin::UnknownPin => {}
+                MyPin::Mode01 => {} // Mode01 is input only
                 p => {
-                    // Blink the lamp for 0.5 seconds
+                    // Blink the lamp for a short time
                     set_output::spawn(p).ok();
-                    clear_output::spawn_after(500u64.millis(), p).ok();
+                    clear_output::spawn_after(MEDIUM_TIME.millis(), p).ok();
                 }
             }
         });
         (rand,).lock(|rand| {
             if *rand {
-                rand_output::spawn_after(50u64.millis()).ok();
+                rand_output::spawn_after(VERY_SHORT_TIME.millis()).ok();
             }
         });
     }
@@ -820,7 +843,7 @@ mod app {
         });
     }
 
-    #[task(priority = 1, capacity = 64, shared = [ioe0, output])]
+    #[task(priority = 1, capacity = 16, shared = [ioe0, output])]
     fn clear_output(cx: clear_output::Context, pin: MyPin) {
         let clear_output::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
@@ -857,13 +880,13 @@ mod app {
     #[task(priority = 1, capacity = 4)]
     fn click_relay01(_cx: click_relay01::Context) {
         set_output::spawn(MyPin::Relay01).ok();
-        clear_output::spawn_after(100u64.millis(), MyPin::Relay01).ok();
+        clear_output::spawn_after(VERY_SHORT_TIME.millis(), MyPin::Relay01).ok();
     }
 
     #[task(priority = 1, capacity = 4)]
     fn ting_bell01(_cx: ting_bell01::Context) {
         set_output::spawn(MyPin::Bell01).ok();
-        clear_output::spawn_after(100u64.millis(), MyPin::Bell01).ok();
+        clear_output::spawn_after(VERY_SHORT_TIME.millis(), MyPin::Bell01).ok();
     }
 
     #[task(priority = 1, capacity = 4, shared = [ioe0, output])]
@@ -1050,42 +1073,42 @@ mod app {
     fn gamemode_map1(_cx: gamemode_map1::Context) {
         map_a_on::spawn().ok();
         click_relay01::spawn().ok();
-        map_a_off::spawn_after(500u64.millis()).ok();
+        map_a_off::spawn_after(MEDIUM_TIME.millis()).ok();
 
-        map_s_on::spawn_after(1000u64.millis()).ok();
-        click_relay01::spawn_after(1000u64.millis()).ok();
-        map_s_off::spawn_after(1500u64.millis()).ok();
+        map_s_on::spawn_after(LONG_TIME.millis()).ok();
+        click_relay01::spawn_after(LONG_TIME.millis()).ok();
+        map_s_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
 
-        map_all_on::spawn_after(2000u64.millis()).ok();
-        sockets_on::spawn_after(2000u64.millis()).ok();
+        map_all_on::spawn_after((2 * LONG_TIME).millis()).ok();
+        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
     }
 
     #[task(priority = 1, capacity = 4)]
     fn gamemode_map2(_cx: gamemode_map2::Context) {
         map_b_on::spawn().ok();
         click_relay01::spawn().ok();
-        map_b_off::spawn_after(500u64.millis()).ok();
+        map_b_off::spawn_after(MEDIUM_TIME.millis()).ok();
 
-        map_n_on::spawn_after(1000u64.millis()).ok();
-        click_relay01::spawn_after(1000u64.millis()).ok();
-        map_n_off::spawn_after(1500u64.millis()).ok();
+        map_n_on::spawn_after(LONG_TIME.millis()).ok();
+        click_relay01::spawn_after(LONG_TIME.millis()).ok();
+        map_n_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
 
-        map_all_on::spawn_after(2000u64.millis()).ok();
-        sockets_on::spawn_after(2000u64.millis()).ok();
+        map_all_on::spawn_after((2 * LONG_TIME).millis()).ok();
+        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
     }
 
     #[task(priority = 1, capacity = 4)]
     fn gamemode_quiz(_cx: gamemode_quiz::Context) {
         quiz_on::spawn().ok();
         click_relay01::spawn().ok();
-        quiz_off::spawn_after(500u64.millis()).ok();
+        quiz_off::spawn_after(MEDIUM_TIME.millis()).ok();
 
-        quiz_on::spawn_after(1000u64.millis()).ok();
-        click_relay01::spawn_after(1000u64.millis()).ok();
-        quiz_off::spawn_after(1500u64.millis()).ok();
+        quiz_on::spawn_after(LONG_TIME.millis()).ok();
+        click_relay01::spawn_after(LONG_TIME.millis()).ok();
+        quiz_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
 
-        quiz_on::spawn_after(2000u64.millis()).ok();
-        sockets_on::spawn_after(2000u64.millis()).ok();
+        quiz_on::spawn_after((2 * LONG_TIME).millis()).ok();
+        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
     }
 }
 
