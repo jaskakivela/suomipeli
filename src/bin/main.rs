@@ -55,8 +55,8 @@ type MyUart = uart::UartPeripheral<
 pub enum OutTestState {
     Idle,
     TestQuiz,
-    TestMapA,
-    TestMapB,
+    TestMapS,
+    TestMapN,
     TestSocket,
 }
 
@@ -76,6 +76,11 @@ pub enum GameMode {
     Quiz,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GameDifficulty {
+    Novice,
+    Expert,
+}
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [RTC_IRQ, XIP_IRQ, TIMER_IRQ_3, TIMER_IRQ_2])]
 mod app {
     use crate::*;
@@ -100,6 +105,7 @@ mod app {
         tstate: OutTestState,
         estate: EasterEggState,
         gmode: GameMode,
+        gdiff: GameDifficulty,
         game_on: bool,
         socket: Option<MyPin>,
         socket_i: Option<usize>,
@@ -278,6 +284,7 @@ mod app {
                 tstate: OutTestState::TestQuiz,
                 estate: EasterEggState::Start,
                 gmode: GameMode::MapQuizA,
+                gdiff: GameDifficulty::Novice,
                 game_on: false,
                 answers_a: [None; 24],
                 answers_b: [None; 24],
@@ -496,12 +503,13 @@ mod app {
         });
     }
 
-    #[task(priority = 1, capacity = 8, shared = [fall, estate, gmode, game_on, socket, socket_i, answers_a, answers_b, irqc, uart])]
+    #[task(priority = 1, capacity = 8, shared = [fall, estate, gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b, irqc, uart])]
     fn input_event_fall(cx: input_event_fall::Context) {
         let input_event_fall::SharedResources {
             fall,
             estate,
             gmode,
+            gdiff,
             game_on,
             socket,
             socket_i,
@@ -541,46 +549,44 @@ mod app {
                 });
             }
 
-            (game_on,).lock(|game_on| {
-                (estate,).lock(|estate| {
-                    if !*game_on {
-                        match *estate {
-                            EasterEggState::Start => {
-                                if let MyPin::Map05_Turku = pin {
-                                    *estate = EasterEggState::Phase1;
-                                }
-                            }
-                            EasterEggState::Phase1 => {
-                                if let MyPin::Map01_Tammisaari = pin {
-                                    *estate = EasterEggState::Phase2;
-                                } else {
-                                    *estate = EasterEggState::Start;
-                                }
-                            }
-                            EasterEggState::Phase2 => {
-                                if let MyPin::Map05_Turku = pin {
-                                    *estate = EasterEggState::Phase3;
-                                } else {
-                                    *estate = EasterEggState::Start;
-                                }
-                            }
-                            EasterEggState::Phase3 => {
-                                if let MyPin::Map01_Tammisaari = pin {
-                                    *estate = EasterEggState::Go;
-                                } else {
-                                    *estate = EasterEggState::Start;
-                                }
-                            }
-                            EasterEggState::Go => {
-                                out_zero::spawn().ok();
-                                easter_egg::spawn(pin).ok();
-                            }
-                        }
+            (estate,).lock(|estate| match *estate {
+                EasterEggState::Start => {
+                    if let MyPin::Map05_Turku = pin {
+                        *estate = EasterEggState::Phase1;
                     }
-                });
+                }
+                EasterEggState::Phase1 => {
+                    if let MyPin::Map01_Tammisaari = pin {
+                        *estate = EasterEggState::Phase2;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Phase2 => {
+                    if let MyPin::Map05_Turku = pin {
+                        *estate = EasterEggState::Phase3;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Phase3 => {
+                    if let MyPin::Map01_Tammisaari = pin {
+                        *estate = EasterEggState::Go;
+                    } else {
+                        *estate = EasterEggState::Start;
+                    }
+                }
+                EasterEggState::Go => {
+                    out_zero::spawn().ok();
+                    easter_egg::spawn(pin).ok();
+                }
+            });
 
-                (gmode, socket, socket_i, answers_a, answers_b).lock(
-                    |gmode, socket, socket_i, answers_a, answers_b| {
+            (
+                gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b,
+            )
+                .lock(
+                    |gmode, gdiff, game_on, socket, socket_i, answers_a, answers_b| {
                         match pin {
                             MyPin::Mode01 | MyPin::UnknownPin => {
                                 // ignore these (Mode01 is handled at rising edge)
@@ -606,6 +612,47 @@ mod app {
                                 } else if let Some(i) = socket_i {
                                     // if we already have a socket connected
                                     let socket = socket.unwrap_or(MyPin::UnknownPin);
+
+                                    if !*game_on {
+                                        // Difficulty level selection only available before starting the game
+                                        match *gmode {
+                                            GameMode::MapQuizA | GameMode::MapQuizB => {
+                                                if pin == MyPin::Quiz03 {
+                                                    match *gdiff {
+                                                        GameDifficulty::Novice => {
+                                                            *gdiff = GameDifficulty::Expert;
+                                                            set_output::spawn(MyPin::Quiz03).ok();
+                                                        }
+                                                        GameDifficulty::Expert => {
+                                                            *gdiff = GameDifficulty::Novice;
+                                                            clear_output::spawn(MyPin::Quiz03).ok();
+                                                        }
+                                                    }
+                                                    return;
+                                                }
+                                            }
+                                            GameMode::Quiz => {
+                                                if pin == MyPin::Map47_Utsjoki {
+                                                    match *gdiff {
+                                                        GameDifficulty::Novice => {
+                                                            *gdiff = GameDifficulty::Expert;
+                                                            set_output::spawn(MyPin::Map47_Utsjoki)
+                                                                .ok();
+                                                        }
+                                                        GameDifficulty::Expert => {
+                                                            *gdiff = GameDifficulty::Novice;
+                                                            clear_output::spawn(
+                                                                MyPin::Map47_Utsjoki,
+                                                            )
+                                                            .ok();
+                                                        }
+                                                    }
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     *game_on = true;
                                     match *gmode {
                                         GameMode::Quiz => {
@@ -615,6 +662,10 @@ mod app {
                                                 clear_output::spawn(pin).ok();
                                                 clear_output::spawn(socket).ok();
                                                 answers_a[*i] = None;
+                                            } else if *gdiff == GameDifficulty::Expert {
+                                                // no mistakes allowed in expert mode
+                                                click_relay01::spawn().ok();
+                                                gamemode_quiz::spawn().ok();
                                             }
                                         }
                                         GameMode::MapQuizA => {
@@ -625,8 +676,12 @@ mod app {
                                                 clear_output::spawn(socket).ok();
                                                 answers_a[*i] = None;
                                             } else if pin == MyPin::Quiz02 {
-                                                *gmode = GameMode::MapQuizB;
+                                                // Switch to Map B
                                                 gamemode_mapB::spawn().ok();
+                                            } else if *gdiff == GameDifficulty::Expert {
+                                                // no mistakes allowed in expert mode
+                                                click_relay01::spawn().ok();
+                                                gamemode_map::spawn().ok();
                                             }
                                         }
                                         GameMode::MapQuizB => {
@@ -637,8 +692,12 @@ mod app {
                                                 clear_output::spawn(socket).ok();
                                                 answers_b[*i] = None;
                                             } else if pin == MyPin::Quiz01 {
-                                                *gmode = GameMode::MapQuizA;
+                                                // Switch to Map A
                                                 gamemode_mapA::spawn().ok();
+                                            } else if *gdiff == GameDifficulty::Expert {
+                                                // no mistakes allowed in expert mode
+                                                click_relay01::spawn().ok();
+                                                gamemode_map::spawn().ok();
                                             }
                                         }
                                     }
@@ -647,11 +706,10 @@ mod app {
                         };
                     },
                 );
-            });
         }
     }
 
-    #[task(priority = 1, capacity = 8, shared = [rise, gmode, game_on, socket, socket_i, answers_a, answers_b, irqc, uart])]
+    #[task(priority = 1, capacity = 8, shared = [rise, gmode, game_on, socket, socket_i, irqc, uart])]
     fn input_event_rise(cx: input_event_rise::Context) {
         let input_event_rise::SharedResources {
             rise,
@@ -659,8 +717,6 @@ mod app {
             game_on,
             socket,
             socket_i,
-            answers_a,
-            answers_b,
             irqc,
             uart,
             ..
@@ -707,51 +763,33 @@ mod app {
             }
 
             if let MyPin::Mode01 = pin {
-                (gmode, game_on, answers_a, answers_b).lock(
-                    |gmode, game_on, answers_a, answers_b| {
-                        // Has the MODE switch been pressed?
-                        // We have a state machine for mode change.
-                        if *game_on {
-                            // The game is on: RESTART the current game mode
-                            match *gmode {
-                                GameMode::MapQuizA | GameMode::MapQuizB => {
-                                    *gmode = GameMode::MapQuizA;
-                                    *game_on = false;
-                                    *answers_a = ANSWERS_MAP_A;
-                                    *answers_b = ANSWERS_MAP_B;
-
-                                    ting_bell01::spawn().ok();
-                                    ting_bell01::spawn_after(MEDIUM_TIME.millis()).ok();
-                                    gamemode_map::spawn_after(MEDIUM_TIME.millis()).ok();
-                                }
-                                GameMode::Quiz => {
-                                    *gmode = GameMode::Quiz;
-                                    *game_on = false;
-                                    *answers_a = ANSWERS_QUIZ;
-                                    out_zero::spawn().ok();
-                                    ting_bell01::spawn().ok();
-                                    ting_bell01::spawn_after(MEDIUM_TIME.millis()).ok();
-                                    gamemode_quiz::spawn_after(MEDIUM_TIME.millis()).ok();
-                                }
+                (gmode, game_on).lock(|gmode, game_on| {
+                    // Has the MODE switch been pressed?
+                    // We have a state machine for mode change.
+                    if *game_on {
+                        // The game is on: RESTART the current game mode
+                        match *gmode {
+                            GameMode::MapQuizA | GameMode::MapQuizB => {
+                                ting_bell01::spawn().ok();
+                                gamemode_map::spawn_after(MEDIUM_TIME.millis()).ok();
                             }
-                        } else {
-                            // The game is not yet on: switch between MAP/QUIZ
-                            match *gmode {
-                                GameMode::Quiz => {
-                                    *gmode = GameMode::MapQuizA;
-                                    *answers_a = ANSWERS_MAP_A;
-                                    *answers_b = ANSWERS_MAP_B;
-                                    gamemode_map::spawn_after(MEDIUM_TIME.millis()).ok();
-                                }
-                                GameMode::MapQuizA | GameMode::MapQuizB => {
-                                    *gmode = GameMode::Quiz;
-                                    *answers_a = ANSWERS_QUIZ;
-                                    gamemode_quiz::spawn_after(MEDIUM_TIME.millis()).ok();
-                                }
+                            GameMode::Quiz => {
+                                ting_bell01::spawn().ok();
+                                gamemode_quiz::spawn_after(MEDIUM_TIME.millis()).ok();
                             }
                         }
-                    },
-                );
+                    } else {
+                        // The game is not yet on: switch between MAP/QUIZ
+                        match *gmode {
+                            GameMode::Quiz => {
+                                gamemode_map::spawn_after(MEDIUM_TIME.millis()).ok();
+                            }
+                            GameMode::MapQuizA | GameMode::MapQuizB => {
+                                gamemode_quiz::spawn_after(MEDIUM_TIME.millis()).ok();
+                            }
+                        }
+                    }
+                });
             }
         }
     }
@@ -770,16 +808,16 @@ mod app {
             (ioe0, output, tstate).lock(|ioe0, output, tstate| {
                 let (test, active) = match *tstate {
                     OutTestState::TestQuiz => {
-                        *tstate = OutTestState::TestMapA;
+                        *tstate = OutTestState::TestMapS;
                         (&OUT_QUIZ, true)
                     }
-                    OutTestState::TestMapA => {
-                        *tstate = OutTestState::TestMapB;
-                        (&OUT_MAP_A, true)
+                    OutTestState::TestMapS => {
+                        *tstate = OutTestState::TestMapN;
+                        (&OUT_MAP_S, true)
                     }
-                    OutTestState::TestMapB => {
+                    OutTestState::TestMapN => {
                         *tstate = OutTestState::TestSocket;
-                        (&OUT_MAP_B, true)
+                        (&OUT_MAP_N, true)
                     }
                     OutTestState::TestSocket => {
                         *tstate = OutTestState::Idle;
@@ -844,8 +882,8 @@ mod app {
 
         let (test, test_active) = match pin {
             MyPin::Quiz01 => (&OUT_QUIZ, true),
-            MyPin::Quiz02 => (&OUT_MAP_A, true),
-            MyPin::Quiz03 => (&OUT_MAP_B, true),
+            MyPin::Quiz02 => (&OUT_MAP_S, true),
+            MyPin::Quiz03 => (&OUT_MAP_N, true),
             MyPin::Quiz04 => (&OUT_SOCKET, true),
             MyPin::Quiz05 => {
                 out_zero::spawn().ok();
@@ -880,7 +918,7 @@ mod app {
         }
     }
 
-    #[task(priority = 1, capacity = 8, shared = [ioe0, output])]
+    #[task(priority = 1, capacity = 32, shared = [ioe0, output])]
     fn set_output(cx: set_output::Context, pin: MyPin) {
         let set_output::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
@@ -1011,7 +1049,7 @@ mod app {
         let map_a_on::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
             (0..24).for_each(|i| {
-                let pin_bits = OUT_MAP_A[i] as u32;
+                let pin_bits = ANSWERS_MAP_A[i].unwrap() as u32;
                 let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                 let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
                 output[chip] = out;
@@ -1025,7 +1063,7 @@ mod app {
         let map_a_off::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
             (0..24).for_each(|i| {
-                let pin_bits = OUT_MAP_A[i] as u32;
+                let pin_bits = ANSWERS_MAP_A[i].unwrap() as u32;
                 let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                 let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
                 output[chip] = out;
@@ -1039,7 +1077,7 @@ mod app {
         let map_b_on::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
             (0..24).for_each(|i| {
-                let pin_bits = OUT_MAP_B[i] as u32;
+                let pin_bits = ANSWERS_MAP_B[i].unwrap() as u32;
                 let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                 let out = output[chip] | 1u16 << ((pin_bits & 0xFF) as u8);
                 output[chip] = out;
@@ -1053,7 +1091,7 @@ mod app {
         let map_b_off::SharedResources { ioe0, output, .. } = cx.shared;
         (ioe0, output).lock(|ioe0, output| {
             (0..24).for_each(|i| {
-                let pin_bits = OUT_MAP_B[i] as u32;
+                let pin_bits = ANSWERS_MAP_B[i].unwrap() as u32;
                 let chip = ((pin_bits & 0xFF00) >> 8) as usize;
                 let out = output[chip] & !(1u16 << ((pin_bits & 0xFF) as u8));
                 output[chip] = out;
@@ -1130,14 +1168,52 @@ mod app {
         map_n_off::spawn().ok();
     }
 
+    // When starting a NEW Quiz Game
+    #[task(priority = 1, capacity = 4, shared = [answers_a, gmode, gdiff, game_on])]
+    fn gamemode_quiz(cx: gamemode_quiz::Context) {
+        let gamemode_quiz::SharedResources {
+            answers_a,
+            gmode,
+            gdiff,
+            game_on,
+        } = cx.shared;
+
+        (answers_a, gmode, game_on).lock(|answers_a, gmode, game_on| {
+            *gmode = GameMode::Quiz;
+            *game_on = false;
+            *answers_a = ANSWERS_QUIZ;
+        });
+
+        debug::spawn("Gamemode QUIZ starting NEW game.\r\n".as_bytes()).ok();
+
+        out_zero::spawn().ok();
+        quiz_on::spawn().ok();
+        click_relay01::spawn().ok();
+        quiz_off::spawn_after(MEDIUM_TIME.millis()).ok();
+
+        click_relay01::spawn_after(LONG_TIME.millis()).ok();
+        quiz_on::spawn_after(LONG_TIME.millis()).ok();
+        quiz_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
+
+        quiz_on::spawn_after((2 * LONG_TIME).millis()).ok();
+        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
+
+        (gdiff,).lock(|gdiff| {
+            if let GameDifficulty::Expert = *gdiff {
+                set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Map47_Utsjoki).ok();
+            }
+        });
+    }
+
     // When starting a NEW Map game
     //
-    #[task(priority = 1, capacity = 4, shared = [answers_a, answers_b, gmode, game_on])]
+    #[task(priority = 1, capacity = 4, shared = [answers_a, answers_b, gmode, gdiff, game_on])]
     fn gamemode_map(cx: gamemode_map::Context) {
         let gamemode_map::SharedResources {
             answers_a,
             answers_b,
             gmode,
+            gdiff,
             game_on,
         } = cx.shared;
 
@@ -1148,47 +1224,72 @@ mod app {
             *answers_b = ANSWERS_MAP_B;
         });
 
-        debug::spawn("Gamemode MAP starting\r\n".as_bytes()).ok();
+        debug::spawn("Gamemode MAP starting new game.\r\n".as_bytes()).ok();
 
         out_zero::spawn().ok();
         map_a_on::spawn().ok();
         click_relay01::spawn().ok();
         map_a_off::spawn_after(MEDIUM_TIME.millis()).ok();
 
-        map_b_on::spawn_after((2 * MEDIUM_TIME).millis()).ok();
-        click_relay01::spawn_after((2 * MEDIUM_TIME).millis()).ok();
-        map_b_off::spawn_after((3 * MEDIUM_TIME).millis()).ok();
+        click_relay01::spawn_after(LONG_TIME.millis()).ok();
+        map_b_on::spawn_after(LONG_TIME.millis()).ok();
+        map_b_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
 
         set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz01).ok();
         map_all_on::spawn_after((2 * LONG_TIME).millis()).ok();
         sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
+
+        (gdiff,).lock(|gdiff| {
+            if let GameDifficulty::Expert = *gdiff {
+                set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz03).ok();
+            }
+        });
     }
 
-    // Switch between map A and B
-    #[task(priority = 1, capacity = 4, shared = [answers_a])]
+    // Switch between map B -> A
+    #[task(priority = 1, capacity = 4, shared = [gmode, gdiff, answers_a])]
     fn gamemode_mapA(cx: gamemode_mapA::Context) {
-        let gamemode_mapA::SharedResources { answers_a, .. } = cx.shared;
+        let gamemode_mapA::SharedResources {
+            gmode,
+            gdiff,
+            answers_a,
+            ..
+        } = cx.shared;
 
-        debug::spawn("Switching to map A\r\n".as_bytes()).ok();
+        debug::spawn("Switching to map A.\r\n".as_bytes()).ok();
+
         quiz_off::spawn().ok();
         sockets_off::spawn().ok();
         click_relay01::spawn_after(MEDIUM_TIME.millis()).ok();
         click_relay01::spawn_after((2 * MEDIUM_TIME).millis()).ok();
         set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz01).ok();
 
-        (answers_a,).lock(|answers_a| {
-            (0..24).for_each(|i: usize| {
-                if !answers_a[i].is_none() {
-                    let pin = answers_a[i].unwrap();
-                    set_output::spawn(pin).ok();
+        (gmode, gdiff, answers_a).lock(|gmode, gdiff, answers_a| {
+            *gmode = GameMode::MapQuizA;
+            for socket in &OUT_SOCKET {
+                let i = socket_index(*socket);
+
+                if i.is_some() {
+                    if answers_a[i.unwrap()].is_some() {
+                        set_output::spawn(*socket).ok();
+                    }
                 }
-            });
+            }
+            if let GameDifficulty::Expert = *gdiff {
+                set_output::spawn(MyPin::Quiz03).ok();
+            }
         });
     }
 
-    #[task(priority = 1, capacity = 4, shared = [answers_b])]
+    // Switch between map A -> B
+    #[task(priority = 1, capacity = 4, shared = [gmode, gdiff, answers_b])]
     fn gamemode_mapB(cx: gamemode_mapB::Context) {
-        let gamemode_mapB::SharedResources { answers_b, .. } = cx.shared;
+        let gamemode_mapB::SharedResources {
+            gmode,
+            gdiff,
+            answers_b,
+            ..
+        } = cx.shared;
 
         debug::spawn("Switching to map B\r\n".as_bytes()).ok();
 
@@ -1198,47 +1299,21 @@ mod app {
         click_relay01::spawn_after((2 * MEDIUM_TIME).millis()).ok();
         set_output::spawn_after((2 * LONG_TIME).millis(), MyPin::Quiz02).ok();
 
-        (answers_b,).lock(|answers_b| {
-            (0..24).for_each(|i: usize| {
-                if !answers_b[i].is_none() {
-                    let pin = answers_b[i].unwrap();
-                    set_output::spawn(pin).ok();
+        (gmode, gdiff, answers_b).lock(|gmode, gdiff, answers_b| {
+            *gmode = GameMode::MapQuizB;
+            for socket in &OUT_SOCKET {
+                let i = socket_index(*socket);
+
+                if i.is_some() {
+                    if answers_b[i.unwrap()].is_some() {
+                        set_output::spawn(*socket).ok();
+                    }
                 }
-            });
+            }
+            if let GameDifficulty::Expert = *gdiff {
+                set_output::spawn(MyPin::Quiz03).ok();
+            }
         });
-    }
-
-    /*
-    #[task(priority = 1, capacity = 4)]
-    fn gamemode_map2(_cx: gamemode_map2::Context) {
-        map_b_on::spawn().ok();
-        click_relay01::spawn().ok();
-        map_b_off::spawn_after(MEDIUM_TIME.millis()).ok();
-
-        map_n_on::spawn_after(LONG_TIME.millis()).ok();
-        click_relay01::spawn_after(LONG_TIME.millis()).ok();
-        map_n_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
-
-        map_all_on::spawn_after((2 * LONG_TIME).millis()).ok();
-        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
-    }
-    */
-
-    // When starting a NEW Quiz Game
-    #[task(priority = 1, capacity = 4)]
-    fn gamemode_quiz(_cx: gamemode_quiz::Context) {
-        out_zero::spawn().ok();
-
-        quiz_on::spawn().ok();
-        click_relay01::spawn().ok();
-        quiz_off::spawn_after(MEDIUM_TIME.millis()).ok();
-
-        quiz_on::spawn_after(LONG_TIME.millis()).ok();
-        click_relay01::spawn_after(LONG_TIME.millis()).ok();
-        quiz_off::spawn_after((LONG_TIME + MEDIUM_TIME).millis()).ok();
-
-        quiz_on::spawn_after((2 * LONG_TIME).millis()).ok();
-        sockets_on::spawn_after((2 * LONG_TIME).millis()).ok();
     }
 
     #[task(priority = 1, shared = [uart])]
