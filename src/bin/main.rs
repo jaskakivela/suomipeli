@@ -321,7 +321,8 @@ mod app {
         (irqc, sw_pin).lock(|irqc, sw_pin| {
             write!(
                 Wrapper::new(&mut buf),
-                "irqc = {}, swpin = {}\r\n",
+                "{}: irqc = {}, swpin = {}\r\n",
+                monotonics::now().duration_since_epoch().to_secs(),
                 *irqc,
                 sw_pin.is_high().unwrap() as u8
             )
@@ -747,7 +748,7 @@ mod app {
                 p => {
                     // Blink the lamp for 0.5 seconds
                     set_output::spawn(p).ok();
-                    clear_output::spawn_after(500u64.millis(), p).ok();
+                    clear_output::spawn_after(200u64.millis(), p).ok();
                 }
             }
         });
