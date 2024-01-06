@@ -8,7 +8,7 @@ resolver = "2"
 
 
 [features]
-default = ["io_irq", "test_output", "io_debug", "input_debug"]
+default = ["io_irq", "test_output", "input_debug"]
 io_irq = []
 io_noirq = []
 io_debug = []
