@@ -518,43 +518,45 @@ mod app {
                 });
             }
 
-            (estate,).lock(|estate| match *estate {
-                EasterEggState::Start => {
-                    if let MyPin::Map05_Turku = pin {
-                        *estate = EasterEggState::Phase1;
+            (estate,).lock(|estate| {
+                match *estate {
+                    EasterEggState::Start => {
+                        if let MyPin::Map05_Turku = pin {
+                            *estate = EasterEggState::Phase1;
+                        }
                     }
-                }
-                EasterEggState::Phase1 => {
-                    if let MyPin::Map01_Tammisaari = pin {
-                        *estate = EasterEggState::Phase2;
-                    } else {
+                    EasterEggState::Phase1 => {
+                        if let MyPin::Map01_Tammisaari = pin {
+                            *estate = EasterEggState::Phase2;
+                        } else {
+                            *estate = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Phase2 => {
+                        if let MyPin::Map05_Turku = pin {
+                            *estate = EasterEggState::Phase3;
+                        } else {
+                            *estate = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Phase3 => {
+                        if let MyPin::Map01_Tammisaari = pin {
+                            *estate = EasterEggState::Go;
+                        } else {
+                            *estate = EasterEggState::Start;
+                        }
+                    }
+                    EasterEggState::Go => {
                         *estate = EasterEggState::Start;
+                        easter_egg::spawn(pin).ok();
                     }
-                }
-                EasterEggState::Phase2 => {
-                    if let MyPin::Map05_Turku = pin {
-                        *estate = EasterEggState::Phase3;
-                    } else {
-                        *estate = EasterEggState::Start;
-                    }
-                }
-                EasterEggState::Phase3 => {
-                    if let MyPin::Map01_Tammisaari = pin {
-                        *estate = EasterEggState::Go;
-                    } else {
-                        *estate = EasterEggState::Start;
-                    }
-                }
-                EasterEggState::Go => {
-                    *estate = EasterEggState::Start;
-                    easter_egg::spawn(pin).ok();
                 }
             });
 
             (gmode, socket, socket_i, answers).lock(|gmode, socket, socket_i, answers| {
                 match pin {
                     MyPin::Mode01 | MyPin::UnknownPin => {
-                        // ignore these
+                        // ignore these (Mode01 is handled at rising edge)
                     }
                     _ => {
                         /*
@@ -572,8 +574,8 @@ mod app {
                             *socket_i = Some(i);
 
                             // blink the light shortly
-                            clear_output::spawn(pin).ok();
-                            set_output::spawn_after(500u64.millis(), pin).ok();
+                            toggle_output::spawn(pin).ok();
+                            toggle_output::spawn_after(200u64.millis(), pin).ok();
                         } else if let Some(i) = socket_i {
                             // if we already have a socket connected
                             let socket = socket.unwrap_or(MyPin::UnknownPin);
@@ -642,6 +644,10 @@ mod app {
                 (socket, socket_i).lock(|socket, socket_i| {
                     *socket = None;
                     *socket_i = None;
+
+                    // blink the light shortly
+                    toggle_output::spawn(pin).ok();
+                    toggle_output::spawn_after(200u64.millis(), pin).ok();
                 });
             }
 
