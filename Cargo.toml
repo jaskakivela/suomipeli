@@ -1,9 +1,9 @@
 [package]
-authors = ["sjm"]
+authors = ["sjm", "jk"]
 edition = "2021"
 readme = "README.md"
 name = "suomipeli"
-version = "0.2.2"
+version = "0.4.2"
 resolver = "2"
 
 
