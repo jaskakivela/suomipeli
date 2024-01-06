@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# update the tools / libraries
+
+set -x
+
+rustup update
+cargo update
+cargo install-update -a
+
+# "se clippy on mainio, se osaa välillä neuvoa siistimpään koodiin vaikka siellä ei olekaan kääntäjän mielestä varsinaisia virheitä"
+#
+cargo clippy
