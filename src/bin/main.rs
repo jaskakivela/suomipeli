@@ -683,7 +683,7 @@ mod app {
                                             answers_a[*i] = None;
                                         } else if pin == MyPin::Quiz02 {
                                             // Switch to Map B
-                                            gamemode_mapB::spawn().ok();
+                                            gamemode_map_b::spawn().ok();
                                         } else if *gdiff == GameDifficulty::Expert {
                                             // no mistakes allowed in expert mode
                                             click_relay01::spawn().ok();
@@ -699,7 +699,7 @@ mod app {
                                             answers_b[*i] = None;
                                         } else if pin == MyPin::Quiz01 {
                                             // Switch to Map A
-                                            gamemode_mapA::spawn().ok();
+                                            gamemode_map_a::spawn().ok();
                                         } else if *gdiff == GameDifficulty::Expert {
                                             // no mistakes allowed in expert mode
                                             click_relay01::spawn().ok();
@@ -1180,6 +1180,7 @@ mod app {
     }
 
     // When starting a NEW Quiz Game
+    //
     #[task(priority = 1, capacity = 4, shared = [answers_a, gmode, gdiff, game_on])]
     fn gamemode_quiz(cx: gamemode_quiz::Context) {
         let gamemode_quiz::SharedResources {
@@ -1259,8 +1260,8 @@ mod app {
 
     // Switch between map B -> A
     #[task(priority = 1, capacity = 4, shared = [gmode, gdiff, answers_a])]
-    fn gamemode_mapA(cx: gamemode_mapA::Context) {
-        let gamemode_mapA::SharedResources {
+    fn gamemode_map_a(cx: gamemode_map_a::Context) {
+        let gamemode_map_a::SharedResources {
             gmode,
             gdiff,
             answers_a,
@@ -1292,8 +1293,8 @@ mod app {
 
     // Switch between map A -> B
     #[task(priority = 1, capacity = 4, shared = [gmode, gdiff, answers_b])]
-    fn gamemode_mapB(cx: gamemode_mapB::Context) {
-        let gamemode_mapB::SharedResources {
+    fn gamemode_map_b(cx: gamemode_map_b::Context) {
+        let gamemode_map_b::SharedResources {
             gmode,
             gdiff,
             answers_b,
