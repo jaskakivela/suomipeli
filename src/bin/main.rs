@@ -4,9 +4,20 @@
 #![no_main]
 
 // #![allow(dead_code)]
-// #![allow(unused_imports)]
 // #![allow(unused_mut)]
 // #![allow(unused_variables)]
+
+// For RTIC macro expansion & debugging, uncomment the lines below and run:
+// cargo rustc --bin main -- -Zunpretty=expanded > src/bin/main-exp.rs
+/*
+#![allow(unused_imports)]
+#![feature(panic_internals)]
+#![feature(core_intrinsics)]
+#![feature(structural_match)]
+#![feature(rustc_private)]
+#![feature(coverage_attribute)]
+#![feature(const_fmt_arguments_new)]
+*/
 
 use suomipeli::*;
 

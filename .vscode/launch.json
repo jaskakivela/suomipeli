@@ -7,7 +7,7 @@
         {
             "name": "BMP attach",
             "cwd": "${workspaceRoot}",
-            "executable": "${workspaceRoot}/target/thumbv6m-none-eabi/debug/main",
+            "executable": "${workspaceRoot}/target/thumbv6m-none-eabi/debug/main-exp",
             "request": "attach", // "launch" also works perhaps
             "type": "cortex-debug",
             "servertype": "bmp",
@@ -18,7 +18,7 @@
         {
             "name": "BMP Debug",
             "cwd": "${workspaceRoot}",
-            "executable": "${workspaceRoot}/target/thumbv6m-none-eabi/debug/main",
+            "executable": "${workspaceRoot}/target/thumbv6m-none-eabi/debug/main-exp",
             "request": "launch",
             "preLaunchTask": "rust: cargo build",
             "type": "cortex-debug",
